@@ -234,11 +234,12 @@ function savePurchase({ type, goodsName, amount, supplierName, phone, place, doc
   });
 }
 
-function updatePurchase(id, { type, goodsName, amount, supplierName, phone, place, docType, payment, comment }) {
+// date — только день, время покупки остаётся прежним.
+function updatePurchase(id, { type, goodsName, date, amount, supplierName, phone, place, docType, payment, comment }) {
   return db.transaction('rw', db.purchases, db.periods, db.suppliers, db.auditLog, async () => {
     const purchase = await getEditablePurchase(id);
     const supplierId = await findOrCreateSupplier(supplierName, place, phone);
-    const changes = { type, goodsName, supplierId, place, docType, payment, comment };
+    const changes = { type, goodsName, dt: date + purchase.dt.slice(10), supplierId, place, docType, payment, comment };
     // Сумма закупки с позициями считается только по ним.
     if (!purchase.items.length) changes.amount = amount;
     await applyChanges(db.purchases, 'purchase', purchase, changes);
@@ -253,6 +254,13 @@ function savePurchaseItems(id, items) {
     if (items.length) changes.amount = items.reduce((sum, item) => sum + item.sum, 0);
     await applyChanges(db.purchases, 'purchase', purchase, changes);
   });
+}
+
+// Вечером чеки разбираются подряд: следующая закупка периода без позиций, после последней — с начала.
+async function nextWithoutItems({ id, periodId }) {
+  const purchases = await db.purchases.where('periodId').equals(periodId).toArray();
+  const rest = purchases.filter(p => p.status === 'active' && !p.items.length && p.id !== id);
+  return rest.length ? { purchase: rest.find(p => p.id > id) || rest[0], left: rest.length } : null;
 }
 
 function stornoPurchase(id, reason) {
@@ -282,6 +290,24 @@ function saveBazaar(id, changes) {
   return db.transaction('rw', db.bazaars, db.auditLog, async () => {
     await assertNameFree(db.bazaars, changes.name, id);
     await applyChanges(db.bazaars, 'bazaar', await db.bazaars.get(id), changes);
+  });
+}
+
+// Фото сжимаются до вызова: внутри транзакции нельзя ждать ничего, кроме самой базы.
+function addPhotos(purchaseId, kind, blobs) {
+  return db.transaction('rw', db.purchases, db.periods, db.photos, db.auditLog, async () => {
+    await getEditablePurchase(purchaseId);
+    await db.photos.bulkAdd(blobs.map(blob => ({ purchaseId, kind, blob })));
+    await db.auditLog.add({ entity: 'purchase', entityId: purchaseId, field: 'photoAdded', before: null, after: blobs.length, at: nowLocal() });
+  });
+}
+
+function deletePhoto(id) {
+  return db.transaction('rw', db.purchases, db.periods, db.photos, db.auditLog, async () => {
+    const photo = await db.photos.get(id);
+    await getEditablePurchase(photo.purchaseId);
+    await db.photos.delete(id);
+    await db.auditLog.add({ entity: 'purchase', entityId: photo.purchaseId, field: 'photoDeleted', before: 1, after: null, at: nowLocal() });
   });
 }
 

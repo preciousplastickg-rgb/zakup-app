@@ -11,6 +11,7 @@ const TABS = ['home', 'report', 'more'];
 const PHOTO_MAX_SIDE = 1600;
 const PHOTO_QUALITY = 0.7;
 const DOUBLE_TAP_MS = 600;
+const LEAVE_CONFIRM_MS = 4000;
 const SUGGEST_LIMIT = 6;
 
 const $ = id => document.getElementById(id);
@@ -21,14 +22,14 @@ const dFull = iso => { const [y, m, d] = iso.slice(0, 10).split('-'); return `${
 const radioVal = name => (document.querySelector(`input[name="${name}"]:checked`) || {}).value;
 
 // Опасное действие требует второго нажатия, и случайный двойной тап за него не считается.
-function confirmTwice(button, label, confirmLabel, action) {
+function confirmTwice(button, label, confirmLabel, action, armedClass = 'btn warnb full') {
   let armedAt = 0;
   button.textContent = label;
   button.onclick = async () => {
     if (!armedAt) {
       armedAt = Date.now();
       button.textContent = confirmLabel;
-      button.className = 'btn warnb full';
+      button.className = armedClass;
       return;
     }
     if (Date.now() - armedAt < DOUBLE_TAP_MS) return;
@@ -62,9 +63,13 @@ function chips(el, name, options, value, warnKey) {
 }
 
 let currentView = null;
-let swipeDirection = null;
 let viewSnapshot = '';
-let swipeLeaveAt = 0;
+let leaveWarnedAt = 0;
+let peek = null;         // пока соседний экран готовится к свайпу, show только запоминает его
+const listScroll = {};   // где был список, когда открыли карточку
+
+// Чеки разбирают подряд: после карточки список остаётся там, где был.
+const restoredScroll = view => (currentView === 'card' && view === cardBack ? listScroll[view] || 0 : 0);
 
 // Значения полей экрана: по ним видно, ввёл ли человек что-то после открытия.
 function snapshotView(view) {
@@ -73,20 +78,21 @@ function snapshotView(view) {
 }
 
 function show(view) {
+  if (peek) {
+    peek.view = view;
+    return;
+  }
+  const scrollTop = restoredScroll(view);
+  if (view === 'card' && (currentView === 'home' || currentView === 'search')) listScroll[currentView] = window.scrollY;
   VIEWS.forEach(v => { $('v-' + v).hidden = v !== view; });
   currentView = view;
   viewSnapshot = snapshotView(view);
-  swipeLeaveAt = 0;
-  if (swipeDirection) {
-    const section = $('v-' + view);
-    section.classList.add('slide-' + swipeDirection);
-    section.addEventListener('animationend', () => section.classList.remove('slide-left', 'slide-right'), { once: true });
-    swipeDirection = null;
-  }
+  leaveWarnedAt = 0;
+  $('toast').hidden = true;
   $('tabbar').hidden = !TABS.includes(view);
   document.querySelectorAll('.tab').forEach(t => t.setAttribute('aria-current', String(t.dataset.go === view)));
   if (view !== 'card' && view !== 'items') releaseViewPhotos();
-  window.scrollTo(0, 0);
+  window.scrollTo(0, scrollTop);
 }
 
 async function showHome() {
@@ -96,19 +102,41 @@ async function showHome() {
 
 const NAV = { home: showHome, report: () => showReport(), more: showMore, card: () => openCard(cardId), search: () => openSearch() };
 
+function hasUnsavedInput() {
+  return viewSnapshot !== snapshotView(currentView) || (currentView === 'new' && form.photoJobs.length > 0);
+}
+
+const leaveGuarded = () => currentView !== 'search' && hasUnsavedInput() && Date.now() - leaveWarnedAt > LEAVE_CONFIRM_MS;
+
+// Введённое не теряется от случайного нажатия или жеста: сначала предупреждение, выход только по второму разу.
+function mustConfirmLeave(hint) {
+  if (currentView === 'search' || !hasUnsavedInput()) return false;
+  const since = Date.now() - leaveWarnedAt;
+  if (since < DOUBLE_TAP_MS) return true;
+  if (since <= LEAVE_CONFIRM_MS) return false;
+  leaveWarnedAt = Date.now();
+  toast(`Введённое не сохранено. ${hint}`);
+  return true;
+}
+
 document.addEventListener('click', e => {
   const go = e.target.closest('[data-go]');
-  if (go) NAV[go.dataset.go]();
+  if (!go || (go.classList.contains('back') && mustConfirmLeave('Нажмите «Назад» ещё раз, чтобы выйти.'))) return;
+  NAV[go.dataset.go]();
 });
 
-/* Свайп между вкладками */
+/* Свайп: экран идёт за пальцем, соседний въезжает рядом. Вправо на внутреннем экране — это «Назад». */
 
-const SWIPE_MIN_PX = 70;
-const SWIPE_MAX_MS = 600;
-const SWIPE_LEAVE_MS = 4000;
+const SWIPE_COMMIT_SHARE = 0.3;      // палец отпущен дальше этой доли экрана: переход состоится
+const SWIPE_FLICK_SPEED = 0.35;      // либо быстрый взмах, пикселей в мс
+const SWIPE_STALE_MS = 80;           // палец постоял перед отпусканием: это уже не взмах
+const SWIPE_RESIST = 0.3;            // дальше листать некуда: экран лишь немного поддаётся
+const SWIPE_SETTLE_MS = [140, 280];  // доезжает тем быстрее, чем быстрее был взмах
+const SWIPE_SIDEWAYS_RATIO = 1.5;    // наклонное движение — это прокрутка страницы
 // Здесь палец и так ходит вбок: ведут по графику, двигают курсор в поле.
-const SWIPE_IGNORE = '.plot, input, textarea, select';
+const SWIPE_IGNORE = '.plot, input:not([type="radio"]):not([type="checkbox"]), textarea, select';
 let swipeStart = null;
+let drag = null;
 
 // Таблица мешает свайпу, только если её действительно есть куда листать.
 function scrollsSideways(target) {
@@ -116,49 +144,147 @@ function scrollsSideways(target) {
   return !!box && box.scrollWidth > box.clientWidth;
 }
 
-function hasUnsavedInput() {
-  return viewSnapshot !== snapshotView(currentView) || (currentView === 'new' && form.photoJobs.length > 0);
+function swipeGoal(dir) {
+  if (TABS.includes(currentView)) return TABS[TABS.indexOf(currentView) - dir] || null;
+  if (dir < 0) return null;
+  const back = $('v-' + currentView).querySelector('.back, [data-go]');
+  return back ? back.dataset.go : null;
 }
 
-// Свайп вправо на внутреннем экране работает как «Назад». Введённое не теряется от случайного жеста:
-// сначала предупреждение, выход только по второму свайпу.
-function swipeBack() {
-  const back = $('v-' + currentView).querySelector('.back, [data-go]');
-  if (!back) return;
-  if (currentView !== 'search' && hasUnsavedInput() && Date.now() - swipeLeaveAt > SWIPE_LEAVE_MS) {
-    swipeLeaveAt = Date.now();
-    toast('Введённое не сохранено. Свайпните ещё раз, чтобы выйти.');
+function paintDrag(d) {
+  d.frame = 0;
+  d.section.style.setProperty('--swipe-x', `${d.x}px`);
+  const beside = `${d.x - d.dir * d.width}px`;
+  if (d.target) d.target.style.setProperty('--swipe-x', beside);
+  if (d.bar) d.bar.style.setProperty('--swipe-x', beside);
+}
+
+// Соседний экран заполняется заранее и стоит рядом с текущим. Прокрутка окна при этом не меняется.
+async function prepareTarget(d) {
+  peek = {};
+  try {
+    await NAV[d.go]();
+    d.view = peek.view;
+  } catch (err) {
+    console.error(err);
     return;
+  } finally {
+    peek = null;
   }
-  swipeDirection = 'right';
-  back.click();
+  d.target = $('v-' + d.view);
+  d.target.style.left = `${d.box.left}px`;
+  d.target.style.width = `${d.box.width}px`;
+  d.target.style.top = `${d.box.top + window.scrollY - restoredScroll(d.view)}px`;
+  d.target.style.position = 'fixed';
+  d.target.classList.add('dragging');
+  d.target.hidden = false;
+  if (TABS.includes(d.view) && !TABS.includes(currentView)) {
+    d.bar = $('tabbar');
+    d.bar.classList.add('swipe-bar');
+    d.bar.hidden = false;
+  }
+  paintDrag(d);
+}
+
+function beginDrag(dx) {
+  const dir = Math.sign(dx);
+  const section = $('v-' + currentView);
+  drag = {
+    dir,
+    section,
+    go: swipeGoal(dir),
+    guarded: !TABS.includes(currentView) && leaveGuarded(),
+    box: section.getBoundingClientRect(),
+    width: window.innerWidth,
+    startX: swipeStart.x,
+    lastX: swipeStart.x,
+    lastAt: performance.now(),
+    pull: 0,
+    x: 0,
+    speed: 0,
+    frame: 0,
+    released: false,
+    view: null,
+    target: null,
+    bar: null,
+    ready: Promise.resolve(),
+  };
+  section.classList.add('dragging');
+  if (drag.go && !drag.guarded) drag.ready = prepareTarget(drag);
+}
+
+function moveDrag(d, clientX) {
+  const now = performance.now();
+  if (now > d.lastAt) d.speed = 0.7 * (clientX - d.lastX) / (now - d.lastAt) + 0.3 * d.speed;
+  d.lastX = clientX;
+  d.lastAt = now;
+  d.pull = Math.max((clientX - d.startX) * d.dir, 0);
+  const free = d.go && !d.guarded;
+  d.x = d.dir * (free ? Math.min(d.pull, d.width) : d.pull * SWIPE_RESIST);
+  if (!d.frame) d.frame = requestAnimationFrame(() => paintDrag(d));
+}
+
+function finishDrag(d, commit) {
+  [d.section, d.target, d.bar].filter(Boolean).forEach(el => {
+    el.classList.remove('dragging', 'settling', 'swipe-bar');
+    el.style.removeProperty('--swipe-x');
+  });
+  if (d.target) {
+    d.target.style.position = d.target.style.left = d.target.style.width = d.target.style.top = '';
+    d.target.hidden = !commit;
+  }
+  drag = null;
+  if (commit) show(d.view);
+  else $('tabbar').hidden = !TABS.includes(currentView);
+}
+
+async function releaseDrag(d, lifted) {
+  d.released = true;
+  cancelAnimationFrame(d.frame);
+  await d.ready;
+  if (performance.now() - d.lastAt > SWIPE_STALE_MS) d.speed = 0;
+  const pulled = lifted && (d.pull > d.width * SWIPE_COMMIT_SHARE || d.speed * d.dir > SWIPE_FLICK_SPEED);
+  if (pulled && d.guarded) mustConfirmLeave('Свайпните ещё раз, чтобы выйти.');
+  const commit = pulled && !!d.view;
+  const end = commit ? d.dir * d.width : 0;
+  const [fastest, slowest] = SWIPE_SETTLE_MS;
+  const ms = Math.round(Math.min(slowest, Math.max(fastest, Math.abs(end - d.x) / Math.max(Math.abs(d.speed), 0.01))));
+  document.documentElement.style.setProperty('--swipe-ms', `${ms}ms`);
+  [d.section, d.target, d.bar].filter(Boolean).forEach(el => el.classList.add('settling'));
+  d.x = end;
+  paintDrag(d);
+  setTimeout(() => finishDrag(d, commit), ms + 20);
 }
 
 document.addEventListener('touchstart', e => {
-  swipeStart = null;
-  if (e.touches.length !== 1 || e.target.closest(SWIPE_IGNORE) || scrollsSideways(e.target)) return;
-  swipeStart = { x: e.touches[0].clientX, y: e.touches[0].clientY, at: Date.now() };
-}, { passive: true });
-
-document.addEventListener('touchend', e => {
-  if (!swipeStart) return;
-  const dx = e.changedTouches[0].clientX - swipeStart.x;
-  const dy = e.changedTouches[0].clientY - swipeStart.y;
-  const quick = Date.now() - swipeStart.at <= SWIPE_MAX_MS;
-  swipeStart = null;
-  // Наклонное движение — это прокрутка страницы, а не свайп.
-  if (!quick || Math.abs(dx) < SWIPE_MIN_PX || Math.abs(dx) < Math.abs(dy) * 2) return;
-  if (!TABS.includes(currentView)) {
-    if (dx > 0) swipeBack();
+  if (drag) {
+    if (!drag.released) releaseDrag(drag, false);
     return;
   }
-  const next = TABS[TABS.indexOf(currentView) + (dx < 0 ? 1 : -1)];
-  if (!next) return;
-  swipeDirection = dx < 0 ? 'left' : 'right';
-  NAV[next]();
+  swipeStart = null;
+  if (e.touches.length !== 1 || e.target.closest(SWIPE_IGNORE) || scrollsSideways(e.target)) return;
+  swipeStart = { x: e.touches[0].clientX, y: e.touches[0].clientY };
 }, { passive: true });
 
-document.addEventListener('touchcancel', () => { swipeStart = null; }, { passive: true });
+// Не passive: направление решается по первому движению, и вбок страница не должна прокручиваться.
+document.addEventListener('touchmove', e => {
+  if (!swipeStart && !drag) return;
+  const { clientX, clientY } = e.touches[0];
+  if (!drag) {
+    const dx = clientX - swipeStart.x;
+    const sideways = e.cancelable && Math.abs(dx) > Math.abs(clientY - swipeStart.y) * SWIPE_SIDEWAYS_RATIO;
+    if (sideways) beginDrag(dx);
+    swipeStart = null;
+    if (!sideways) return;
+  }
+  if (e.cancelable) e.preventDefault();
+  if (!drag.released) moveDrag(drag, clientX);
+}, { passive: false });
+
+['touchend', 'touchcancel'].forEach(type => document.addEventListener(type, e => {
+  swipeStart = null;
+  if (drag && !drag.released) releaseDrag(drag, type === 'touchend');
+}, { passive: true }));
 
 // iOS держит приложение в памяти днями: дата в шапке не должна застывать.
 document.addEventListener('visibilitychange', () => {
@@ -178,8 +304,11 @@ function renderOperation({ kind, x }) {
   const tags = (x.type === 'service' ? '<span class="tag adv">услуга</span>' : '') +
     (storno ? '<span class="tag bad">сторно</span>' : noDoc ? '<span class="tag warn">нет документа</span>' : '');
   const doc = storno || noDoc ? '' : ` · ${DOC[x.docType]}`;
-  return `<button class="item${storno ? ' storno' : ''}" type="button" data-card="${x.id}"><span class="no">№${pad3(x.no)}<br>${dShort(x.dt)}</span><span class="body"><span class="t">${esc(purchaseTitle(x) || x.supplierName)}</span><span class="s">${tags}${tags ? ' ' : ''}${esc(x.supplierName)}${doc}</span></span><span class="a">−${money(x.amount)}</span></button>`;
+  const noItems = x.noItems ? '<br><span class="tag warn">без позиций</span>' : '';
+  return `<button class="item${storno ? ' storno' : ''}" type="button" data-card="${x.id}"><span class="no">№${pad3(x.no)}<br>${dShort(x.dt)}</span><span class="body"><span class="t">${esc(purchaseTitle(x) || x.supplierName)}</span><span class="s">${tags}${tags ? ' ' : ''}${esc(x.supplierName)}${doc}</span></span><span class="a">−${money(x.amount)}${noItems}</span></button>`;
 }
+
+let homeNoItems = false;   // на главной показаны только закупки без позиций
 
 async function renderHome() {
   const period = await getCurrentPeriod();
@@ -198,7 +327,7 @@ async function renderHome() {
   $('h-out').textContent = money(sum.spent);
 
   const notes = [];
-  if (closed) notes.push(`<div class="note warn"><span>Период закрыт ${dFull(period.closed)}. Возврат в кассу: <b class="num">${money(period.ret)} сом</b>.</span></div>`);
+  if (closed) notes.push(`<div class="note warn"><span>Период закрыт ${dFull(period.closed)}. Возврат в кассу: <b class="num">${money(period.ret)} сом</b>.${sum.balance > 0 ? ` На руках осталось <b class="num">${money(sum.balance)} сом</b>, в новый период этот остаток не перейдёт.` : ''}</span></div>`);
   if (sum.balance < 0) notes.push(`<div class="note bad"><span>Перерасход <b class="num">${money(-sum.balance)} сом</b>. Будет отражён в отчёте отдельной строкой.</span></div>`);
   if (sum.noDoc > 0) notes.push(`<div class="note warn"><span>Без документов: <b class="num">${money(sum.noDoc)} сом</b>. Бухгалтерия может не принять эти расходы.</span></div>`);
   const reminder = await backupReminder();
@@ -206,20 +335,30 @@ async function renderHome() {
   $('h-notes').innerHTML = notes.join('');
   if (reminder) $('h-backup').onclick = e => runBackup(e.currentTarget, renderHome);
 
+  // После закрытия позиции внести нельзя, поэтому метка нужна только в открытом периоде.
+  const needsItems = p => !closed && p.status === 'active' && !p.items.length;
+  const noItemsCount = sum.purchases.filter(needsItems).length;
+  if (!noItemsCount) homeNoItems = false;
   const operations = [
-    ...sum.purchases.map(p => ({
+    ...sum.purchases.filter(p => !homeNoItems || needsItems(p)).map(p => ({
       kind: 'purchase', at: p.dt,
-      x: { ...p, supplierName: suppliers.get(p.supplierId) },
+      x: { ...p, supplierName: suppliers.get(p.supplierId), noItems: needsItems(p) },
     })),
-    ...sum.advances.map(a => ({ kind: 'advance', at: a.date + 'T00:00', x: a })),
+    ...(homeNoItems ? [] : sum.advances.map(a => ({ kind: 'advance', at: a.date + 'T00:00', x: a }))),
   ].sort((a, b) => b.at.localeCompare(a.at) || b.x.id - a.x.id);
 
   $('h-count').textContent = `${sum.count} ${plural(sum.count, 'закупка', 'закупки', 'закупок')}`;
+  $('h-filter').hidden = !noItemsCount;
+  $('h-filter').textContent = homeNoItems ? 'Показать все операции' : `Показать без позиций: ${noItemsCount}`;
   $('h-list').innerHTML = operations.length
     ? operations.map(renderOperation).join('')
     : '<div class="empty">Операций пока нет. Начните с выдачи аванса.</div>';
 }
 
+$('h-filter').onclick = () => {
+  homeNoItems = !homeNoItems;
+  renderHome();
+};
 $('b-new').onclick = () => openNew();
 $('b-adv').onclick = openAdvance;
 $('b-newp').onclick = async () => {
@@ -245,38 +384,38 @@ const form = {
   history: [],        // действующие закупки, новые первыми: источник подсказок
   lastSaved: null,    // для кнопки «Ещё у этого поставщика»
   touched: {},        // поля, выбранные вручную: подстановка их не трогает
+  autoPhone: '',      // телефон, подставленный от поставщика: при смене имени он снимается
+  dateRange: null,    // [от, до] для даты закупки в режиме правки
   editing: null,      // закупка в режиме правки, null для новой
   session: {},        // новая форма — новый объект: по нему отсекается фото, дожатое для прошлой формы
-  receipt: null,
-  receiptUrl: null,
-  receiptPick: null,  // последняя съёмка чека: пересъёмка отменяет предыдущую
+  receipts: [],       // [{ blob, url }]
   goods: [],          // [{ blob, url }]
   photoJobs: [],
   noDocArmedAt: 0,
   saving: false,
 };
 
-function setReceipt(blob) {
-  if (form.receiptUrl) URL.revokeObjectURL(form.receiptUrl);
-  form.receipt = blob;
-  form.receiptUrl = blob ? URL.createObjectURL(blob) : null;
-  $('f-photo-empty').hidden = !!blob;
-  $('f-photo-done').hidden = !blob;
-  $('f-photo-img').src = form.receiptUrl || '';
-}
+// Снимки формы: два одинаковых ряда, чеки и товар.
+const FORM_PHOTOS = {
+  receipt: { list: 'receipts', box: 'f-photo-list', title: 'f-photo-title', alt: 'Фото чека' },
+  goods: { list: 'goods', box: 'f-goods-list', title: 'f-goods-title', alt: 'Фото товара' },
+};
 
-function renderGoods() {
-  $('f-goods-list').innerHTML = form.goods.map((g, i) =>
-    `<span class="thumb"><img src="${g.url}" alt="Фото товара ${i + 1}"><button type="button" data-del-goods="${i}" aria-label="Удалить фото товара ${i + 1}"><span>×</span></button></span>`
+function renderPhotos(kind) {
+  const { list, box, title, alt } = FORM_PHOTOS[kind];
+  $(box).innerHTML = form[list].map((p, i) =>
+    `<span class="thumb"><img src="${p.url}" alt="${alt} ${i + 1}"><button type="button" data-del-photo="${kind}" data-index="${i}" aria-label="Удалить: ${alt} ${i + 1}"><span>×</span></button></span>`
   ).join('');
-  const empty = radioVal('type') === 'service' ? 'Сделать фото' : 'Сфотографировать товар';
-  $('f-goods-title').textContent = form.goods.length ? 'Добавить ещё фото' : empty;
+  const empty = kind === 'receipt' ? 'Сфотографировать чек' : radioVal('type') === 'service' ? 'Сделать фото' : 'Сфотографировать товар';
+  $(title).textContent = form[list].length ? 'Добавить ещё фото' : empty;
 }
 
-function clearGoods() {
-  form.goods.forEach(g => URL.revokeObjectURL(g.url));
+function clearPhotos() {
+  [...form.receipts, ...form.goods].forEach(p => URL.revokeObjectURL(p.url));
+  form.receipts = [];
   form.goods = [];
-  renderGoods();
+  renderPhotos('receipt');
+  renderPhotos('goods');
 }
 
 function renderPlaces(selected) {
@@ -294,7 +433,7 @@ function applyPurchaseType() {
   $('f-supplier-label').textContent = service ? 'Исполнитель' : 'Поставщик';
   $('f-phone-label').textContent = service ? 'Телефон исполнителя' : 'Телефон поставщика';
   $('f-place-field').hidden = service;
-  renderGoods();
+  renderPhotos('goods');
   updateSuggestions();
 }
 
@@ -307,11 +446,10 @@ function fillForm({ editing, no, balance, bazaars, suppliers, history, place, ty
   form.bazaars = bazaars.filter(b => b.active);
   form.history = history;
   form.touched = {};
+  form.autoPhone = '';
   form.session = {};
-  form.receiptPick = null;
   form.photoJobs = [];
-  setReceipt(null);
-  clearGoods();
+  clearPhotos();
   resetNoDocConfirm();
 
   $('n-title').textContent = editing ? 'Правка закупки' : 'Новая закупка';
@@ -319,10 +457,11 @@ function fillForm({ editing, no, balance, bazaars, suppliers, history, place, ty
   $('f-back').dataset.go = editing ? 'card' : 'home';
   $('f-receipt-block').hidden = !!editing;
   $('f-goods-field').hidden = !!editing;
+  $('f-date-field').hidden = !editing;
   const itemized = !!editing && editing.items.length > 0;
   $('f-amount').readOnly = itemized;
   $('f-amount-hint').hidden = !itemized;
-  ['f-name', 'f-amount', 'f-supplier', 'f-phone', 'f-comment'].forEach(id => { $(id).value = ''; });
+  ['f-name', 'f-amount', 'f-supplier', 'f-phone', 'f-comment', 'f-date'].forEach(id => { $(id).value = ''; });
   $('f-place-new').hidden = true;
   $('f-place-add').hidden = false;
   renderPlaces(place);
@@ -365,8 +504,9 @@ async function openNew(prefill = null) {
 
 async function openEdit(id) {
   const x = await db.purchases.get(id);
+  const period = await db.periods.get(x.periodId);
   const [sum, bazaars, suppliers, supplier, history] = await Promise.all([
-    db.periods.get(x.periodId).then(periodSummary),
+    periodSummary(period),
     db.bazaars.toArray(),
     db.suppliers.toArray(),
     db.suppliers.get(x.supplierId),
@@ -388,7 +528,15 @@ async function openEdit(id) {
   $('f-amount').value = money(x.amount);
   $('f-supplier').value = supplier.name;
   $('f-phone').value = supplier.phone;
+  form.autoPhone = supplier.phone;
   $('f-comment').value = x.comment;
+  // Номер уникален в пределах года, поэтому дата не выходит за год закупки. Расходы начинаются с открытия периода.
+  const yearStart = `${x.year}-01-01`;
+  const yearEnd = `${x.year}-12-31`;
+  const today = nowLocal().slice(0, 10);
+  form.dateRange = [period.opened > yearStart ? period.opened : yearStart, today < yearEnd ? today : yearEnd];
+  [$('f-date').min, $('f-date').max] = form.dateRange;
+  $('f-date').value = x.dt.slice(0, 10);
   updateSuggestions();
   updateOverspendNote();
   show('new');
@@ -422,35 +570,47 @@ function takePickedFile(input) {
   return file;
 }
 
-function startPhotoJob(file, onReady) {
-  form.photoJobs.push(compressPhoto(file).then(onReady, () => toast('Не удалось открыть фото. Попробуйте снять ещё раз.')));
+function takePickedFiles(input) {
+  const files = [...(input.files || [])];
+  input.value = '';
+  return files;
 }
 
-$('f-photo').addEventListener('change', e => {
-  const file = takePickedFile(e.target);
-  if (!file) return;
-  const pick = form.receiptPick = {};
-  startPhotoJob(file, blob => { if (form.receiptPick === pick) setReceipt(blob); });
-});
-
-$('f-goods').addEventListener('change', e => {
-  const file = takePickedFile(e.target);
-  if (!file) return;
+// Снимки сжимаются по одному: несколько полных кадров сразу iPhone может не потянуть по памяти.
+function queuePhotos(kind, files) {
   const { session } = form;
-  startPhotoJob(file, blob => {
-    if (form.session !== session) return;
-    form.goods.push({ blob, url: URL.createObjectURL(blob) });
-    renderGoods();
+  const previous = form.photoJobs[form.photoJobs.length - 1] || Promise.resolve();
+  form.photoJobs.push(previous.then(async () => {
+    for (const file of files) {
+      let blob;
+      try {
+        blob = await compressPhoto(file);
+      } catch {
+        toast('Не удалось открыть фото. Попробуйте снять ещё раз.');
+        continue;
+      }
+      if (form.session !== session) return;
+      form[FORM_PHOTOS[kind].list].push({ blob, url: URL.createObjectURL(blob) });
+      renderPhotos(kind);
+    }
+  }));
+}
+
+[['f-photo', 'receipt'], ['f-photo-lib', 'receipt'], ['f-goods', 'goods'], ['f-goods-lib', 'goods']].forEach(([id, kind]) => {
+  $(id).addEventListener('change', e => {
+    const files = takePickedFiles(e.target);
+    if (files.length) queuePhotos(kind, files);
   });
 });
 
-$('f-goods-list').addEventListener('click', e => {
-  const b = e.target.closest('[data-del-goods]');
+['f-photo-list', 'f-goods-list'].forEach(id => $(id).addEventListener('click', e => {
+  const b = e.target.closest('[data-del-photo]');
   if (!b) return;
-  const [removed] = form.goods.splice(Number(b.dataset.delGoods), 1);
+  const { delPhoto: kind, index } = b.dataset;
+  const [removed] = form[FORM_PHOTOS[kind].list].splice(Number(index), 1);
   URL.revokeObjectURL(removed.url);
-  renderGoods();
-});
+  renderPhotos(kind);
+}));
 
 function updateOverspendNote() {
   const amount = parseMoney($('f-amount').value) || 0;
@@ -501,17 +661,28 @@ function applySupplierDefaults(name) {
   const query = name.trim().toLowerCase();
   const known = form.suppliers.find(s => s.name.toLowerCase() === query);
   if (!known) return;
-  if (known.phone && !$('f-phone').value) $('f-phone').value = known.phone;
+  if (!$('f-phone').value && known.phone) {
+    $('f-phone').value = known.phone;
+    form.autoPhone = known.phone;
+  }
   const last = form.history.find(p => p.supplierId === known.id && typeOf(p) === radioVal('type'));
   const place = (last && last.place) || known.place;
   if (place && !form.touched.place) renderPlaces(place);
   if (!last || form.editing) return;
+  const doc = radioVal('doc');
   if (!form.touched.doc) setRadio('doc', last.docType);
   if (!form.touched.pay) setRadio('pay', last.payment);
-  resetNoDocConfirm();
+  if (radioVal('doc') !== doc) resetNoDocConfirm();
+}
+
+// Телефон прошлого поставщика не должен достаться новому. Введённый вручную остаётся.
+function dropAutoPhone() {
+  if (form.autoPhone && $('f-phone').value === form.autoPhone) $('f-phone').value = '';
+  form.autoPhone = '';
 }
 
 function pickSupplier(name) {
+  dropAutoPhone();
   $('f-supplier').value = name;
   applySupplierDefaults(name);
   updateSuggestions();
@@ -528,10 +699,12 @@ function pickName(name) {
 
 ['doc', 'pay', 'place'].forEach(name => $('f-' + name).addEventListener('change', () => { form.touched[name] = true; }));
 $('f-name').addEventListener('input', updateSuggestions);
-$('f-supplier').addEventListener('input', e => {
-  applySupplierDefaults(e.target.value);
+$('f-supplier').addEventListener('input', () => {
+  dropAutoPhone();
   updateSuggestions();
 });
+// Не на каждую букву: «ИП Асанов» может оказаться началом имени другого поставщика.
+$('f-supplier').addEventListener('change', e => applySupplierDefaults(e.target.value));
 $('f-name-suggest').addEventListener('click', e => {
   const b = e.target.closest('[data-value]');
   if (b) pickName(b.dataset.value);
@@ -577,11 +750,15 @@ $('f-place-save').onclick = async () => {
   $('f-place-add').hidden = false;
 };
 
+// Подстановка срабатывает при уходе из поля, то есть уже во время нажатия на «Сохранить».
+// Если в этот момент перезаписать кнопку, WebKit отменяет клик, поэтому лишних записей нет.
 function resetNoDocConfirm() {
   form.noDocArmedAt = 0;
-  $('f-save').textContent = form.editing ? 'Сохранить изменения' : 'Сохранить закупку';
-  $('f-save').className = 'btn primary full';
-  $('f-warn').innerHTML = '';
+  const button = $('f-save');
+  const label = form.editing ? 'Сохранить изменения' : 'Сохранить закупку';
+  if (button.textContent !== label) button.textContent = label;
+  if (button.className !== 'btn primary full') button.className = 'btn primary full';
+  if ($('f-warn').innerHTML) $('f-warn').innerHTML = '';
 }
 
 function armNoDocConfirm() {
@@ -605,6 +782,12 @@ async function submitPurchase() {
   if (!goodsName) { toast(`Укажите наименование ${service ? 'услуги' : 'товара'}.`); $('f-name').focus(); return; }
   if (!supplierName) { toast(`Укажите ${service ? 'исполнителя' : 'поставщика'}.`); $('f-supplier').focus(); return; }
   if (!amount) { toast('Введите сумму закупки.'); $('f-amount').focus(); return; }
+  const date = $('f-date').value;
+  if (form.editing && (!date || date < form.dateRange[0] || date > form.dateRange[1])) {
+    toast(`Дата должна быть от ${dFull(form.dateRange[0])} до ${dFull(form.dateRange[1])}.`);
+    $('f-date').focus();
+    return;
+  }
   if (docType === 'none' && !(form.editing && form.editing.docType === 'none')) {
     if (!form.noDocArmedAt) { armNoDocConfirm(); return; }
     // Двойной тап не должен сойти за осознанное второе нажатие.
@@ -628,11 +811,13 @@ async function submitPurchase() {
   let saved;
   try {
     if (form.editing) {
-      await updatePurchase(form.editing.id, data);
+      await updatePurchase(form.editing.id, { ...data, date });
     } else {
       await Promise.all(form.photoJobs);
-      const photos = form.goods.map(g => ({ kind: 'goods', blob: g.blob }));
-      if (form.receipt) photos.unshift({ kind: 'receipt', blob: form.receipt });
+      const photos = [
+        ...form.receipts.map(p => ({ kind: 'receipt', blob: p.blob })),
+        ...form.goods.map(p => ({ kind: 'goods', blob: p.blob })),
+      ];
       saved = await savePurchase(data, photos);
     }
   } catch (err) {
@@ -663,10 +848,10 @@ $('d-same').onclick = () => openNew(form.lastSaved);
 /* Журнал */
 
 const AUDIT_FIELDS = {
-  type: 'Тип', goodsName: 'Наименование', amount: 'Сумма', supplierId: 'Поставщик', place: 'Базар', purposeId: 'Назначение', docType: 'Документ',
+  type: 'Тип', goodsName: 'Наименование', dt: 'Дата', amount: 'Сумма', supplierId: 'Поставщик', place: 'Базар', purposeId: 'Назначение', docType: 'Документ',
   payment: 'Оплата', comment: 'Комментарий', items: 'Позиции', status: 'Статус', stornoReason: 'Причина сторно',
   name: 'Название', phone: 'Телефон', archived: 'В архиве', active: 'Действует',
-  deleted: 'Удалена запись', toArchive: 'В архив', fromArchive: 'Из архива',
+  photoAdded: 'Добавлено фото', photoDeleted: 'Удалено фото', deleted: 'Удалена запись', toArchive: 'В архив', fromArchive: 'Из архива',
   ret: 'Возврат', closed: 'Дата закрытия', revision: 'Редакция', reopenReason: 'Причина переоткрытия',
 };
 const AUDIT_STATUS = { active: 'Активна', storno: 'Сторно', open: 'Открыт', closed: 'Закрыт' };
@@ -687,7 +872,7 @@ function auditValue(field, value, ctx) {
   if (value === null || value === undefined || value === '') return '—';
   switch (field) {
     case 'amount': case 'ret': return `${money(value)} сом`;
-    case 'closed': return dFull(value);
+    case 'closed': case 'dt': return dFull(value);
     case 'supplierId': return ctx.suppliers.get(value);
     case 'purposeId': return ctx.purposes.get(value);
     case 'docType': return DOC[value];
@@ -742,6 +927,8 @@ function viewPhotoUrl(blob) {
 }
 
 function releaseViewPhotos() {
+  // Свайп ещё могут отменить, и тогда текущий экран останется со своими фото.
+  if (peek) return;
   viewPhotoUrls.forEach(url => URL.revokeObjectURL(url));
   viewPhotoUrls = [];
 }
@@ -753,7 +940,8 @@ function renderItemsTable(x) {
   return `<div class="scroll"><table class="items-table"><thead><tr><th>Товар</th><th class="r">Кол-во</th><th>Ед.</th><th class="r">Цена</th><th class="r">Сумма</th></tr></thead><tbody>${rows}</tbody><tfoot><tr><td colspan="4">Итого</td><td class="r">${money(x.amount)}</td></tr></tfoot></table></div>`;
 }
 
-async function openCard(id) {
+// next — следующая закупка без позиций, чтобы разбирать чеки подряд: { purchase, left }.
+async function openCard(id, next = null) {
   cardId = id;
   const x = await db.purchases.get(id);
   const [supplier, period, photos, history, ctx] = await Promise.all([
@@ -765,7 +953,7 @@ async function openCard(id) {
   ]);
   releaseViewPhotos();
   $('c-back').dataset.go = cardBack;
-  const shots = photos.map(p => ({ kind: p.kind, url: viewPhotoUrl(p.blob) }));
+  const shots = photos.map(p => ({ id: p.id, kind: p.kind, url: viewPhotoUrl(p.blob) }));
   const receipts = shots.filter(p => p.kind === 'receipt');
   const goods = shots.filter(p => p.kind === 'goods');
   const storno = x.status === 'storno';
@@ -776,6 +964,7 @@ async function openCard(id) {
   const badge = storno ? '<span class="tag bad">сторно</span>' : x.docType === 'none' ? '<span class="tag warn">нет документа</span>' : '';
   $('c-title').innerHTML = `Закупка <span class="num">№${pad3(x.no)}</span>`;
   $('c-body').innerHTML =
+    (next ? `<button class="btn primary full" type="button" id="c-next">Следующая без позиций: №${pad3(next.purchase.no)} (осталось ${next.left})</button>` : '') +
     `<div class="row"><span class="amount-hero${storno ? ' muted struck' : ''}">${money(x.amount)} сом</span><span class="spacer"></span>${badge}</div>` +
     (storno ? `<div class="note bad"><span><b>Сторнирована.</b> ${esc(x.stornoReason)}</span></div>` : '') +
     '<dl class="kv">' +
@@ -794,11 +983,12 @@ async function openCard(id) {
     (x.items.length ? renderItemsTable(x) : '<div class="ph-none"><span>Позиции не внесены.</span></div>') +
     '<div class="section-h"><h3>Фото документа</h3></div>' +
     (receipts.length
-      ? receipts.map(p => `<img class="photo-full" src="${p.url}" alt="Фото документа №${pad3(x.no)}">`).join('')
-      : `<div class="ph-none"><span>Фото не прикреплено. Бумажный документ с номером <b class="num">№${pad3(x.no)}</b> в бухгалтерии.</span></div>`) +
-    (goods.length
-      ? `<div class="section-h"><h3>${service ? 'Фото' : 'Фото товара'}</h3></div>` + goods.map(p => `<img class="photo-full" src="${p.url}" alt="Фото товара №${pad3(x.no)}">`).join('')
-      : '') +
+      ? receipts.map(p => shotHtml(p, `Фото документа №${pad3(x.no)}`, editable)).join('')
+      : `<div class="ph-none"><span>Фото не прикреплено. На бумажном документе должен стоять номер <b class="num">№${pad3(x.no)}</b>.</span></div>`) +
+    (editable ? '<label class="btn full" for="c-add-receipt">Добавить фото чека</label><input class="file-input" type="file" id="c-add-receipt" accept="image/*" multiple tabindex="-1" aria-label="Добавить фото чека">' : '') +
+    (goods.length || editable ? `<div class="section-h"><h3>${service ? 'Фото' : 'Фото товара'}</h3></div>` : '') +
+    goods.map(p => shotHtml(p, `Фото товара №${pad3(x.no)}`, editable)).join('') +
+    (editable ? `<label class="btn full" for="c-add-goods">${service ? 'Добавить фото' : 'Добавить фото товара'}</label><input class="file-input" type="file" id="c-add-goods" accept="image/*" multiple tabindex="-1" aria-label="Добавить фото товара">` : '') +
     (history.length
       ? `<div class="section-h"><h3>История изменений</h3></div><div class="list">${history.map(e => renderAudit(e, ctx, false)).join('')}</div>`
       : '') +
@@ -809,6 +999,21 @@ async function openCard(id) {
     $('c-edit').onclick = () => openEdit(id);
     $('c-repeat').onclick = () => openNew({ type: x.type, goodsName: x.goodsName, supplierName: supplier.name });
     $('c-st-open').onclick = () => openStorno(x);
+    $('c-add-receipt').onchange = e => addCardPhotos(id, 'receipt', e.target);
+    $('c-add-goods').onchange = e => addCardPhotos(id, 'goods', e.target);
+    $('c-body').querySelectorAll('[data-del-shot]').forEach(b => {
+      confirmTwice(b, 'Удалить это фото', 'Нажмите ещё раз: удалить фото', async () => {
+        await deletePhoto(Number(b.dataset.delShot));
+        await refreshCard(id);
+        toast('Фото удалено');
+      }, 'linkbtn bad');
+    });
+  }
+  if (next) {
+    $('c-next').onclick = () => {
+      cardId = next.purchase.id;
+      openItems(next.purchase.id);
+    };
   }
   if (period.status === 'open') {
     confirmTwice($('c-delete'), 'Удалить запись', `Нажмите ещё раз: удалить №${pad3(x.no)} насовсем`, async () => {
@@ -818,6 +1023,42 @@ async function openCard(id) {
     });
   }
   show('card');
+}
+
+function shotHtml(shot, alt, editable) {
+  const remove = editable ? `<button class="linkbtn bad" type="button" data-del-shot="${shot.id}"></button>` : '';
+  return `<img class="photo-full" src="${shot.url}" alt="${alt}">${remove}`;
+}
+
+// Сжатие занимает время: человек мог уже уйти с этой карточки.
+async function refreshCard(id) {
+  if (currentView !== 'card' || cardId !== id) return;
+  const y = window.scrollY;
+  await openCard(id);
+  window.scrollTo(0, y);
+}
+
+async function addCardPhotos(id, kind, input) {
+  const files = takePickedFiles(input);
+  if (!files.length) return;
+  const blobs = [];
+  for (const file of files) {
+    try {
+      blobs.push(await compressPhoto(file));
+    } catch {
+      toast('Не удалось открыть фото. Попробуйте снять ещё раз.');
+    }
+  }
+  if (!blobs.length) return;
+  try {
+    await addPhotos(id, kind, blobs);
+  } catch (err) {
+    console.error(err);
+    toast('Фото не сохранилось. Попробуйте ещё раз.');
+    return;
+  }
+  await refreshCard(id);
+  toast(blobs.length > 1 ? `Добавлено фото: ${blobs.length}` : 'Фото добавлено');
 }
 
 async function openAdvanceCard(id) {
@@ -1031,7 +1272,7 @@ async function submitItems() {
     itemsForm.saving = false;
     $('i-save').disabled = false;
   }
-  await openCard(id);
+  await openCard(id, await nextWithoutItems(itemsForm.purchase));
   toast('Позиции сохранены');
 }
 
@@ -1395,8 +1636,14 @@ async function showReport(periodId) {
 
   const notes = [];
   if (!r.userName) notes.push('<div class="note warn"><span>ФИО не указано. Заполните его в Настройках, оно попадёт в шапку отчёта.</span></div>');
-  if (r.withoutItems.length) notes.push(`<div class="note warn"><span>Без позиций: ${withoutItemsLabel(r.withoutItems)}. В отчёте у них будет только сумма.</span></div>`);
+  if (r.withoutItems.length) notes.push(`<div class="note warn"><span>Без позиций: ${withoutItemsLabel(r.withoutItems)}. В отчёте у них будет только сумма.</span>${closed ? '' : '<button class="linkbtn" type="button" id="r-noitems">Показать</button>'}</div>`);
   $('r-notes').innerHTML = notes.join('');
+  if (r.withoutItems.length && !closed) {
+    $('r-noitems').onclick = () => {
+      homeNoItems = true;
+      showHome();
+    };
+  }
 
   chips($('r-view'), 'rview', [['stats', 'Статистика'], ['sum', 'Итоги']], reportView);
   chips($('r-range'), 'range', Object.entries(STAT_MODES), statsRange.mode);
@@ -1456,6 +1703,14 @@ function updateCloseButton() {
   $('cl-do').disabled = !($('cl-check').checked && closing.backedUp);
 }
 
+// В новый период остаток не переходит, поэтому неполный возврат нельзя оставить незамеченным.
+function updateReturnNote() {
+  const left = report.issued - report.spent - (parseMoney($('cl-ret').value) || 0);
+  $('cl-left').innerHTML = left > 0
+    ? `<div class="note warn"><span>На руках останется <b class="num">${money(left)} сом</b>. В новый период этот остаток не перейдёт, он будет только в отчёте этого периода.</span></div>`
+    : '';
+}
+
 function openClose() {
   const r = report;
   const available = r.issued - r.spent;
@@ -1469,6 +1724,7 @@ function openClose() {
   if (available < 0) notes.push(`<div class="note bad"><span>Перерасход <b class="num">${money(-available)} сом</b> будет зафиксирован в отчёте.</span></div>`);
   $('cl-notes').innerHTML = notes.join('');
   $('cl-ret').value = money(Math.max(available, 0));
+  updateReturnNote();
   $('cl-check-l').textContent = `Бумажные документы (${r.docsCount} шт.) сданы в бухгалтерию`;
   $('cl-check').checked = false;
   $('cl-backup').textContent = 'Сохранить бэкап';
@@ -1479,6 +1735,7 @@ function openClose() {
 
 $('r-close').onclick = openClose;
 $('cl-check').onchange = updateCloseButton;
+$('cl-ret').addEventListener('input', updateReturnNote);
 
 $('cl-backup').onclick = async e => {
   const button = e.currentTarget;

@@ -52,7 +52,7 @@
 [hidden]{display:none!important}
 img{max-width:100%}
 html{touch-action:manipulation;-webkit-text-size-adjust:100%}
-html,body{height:100%}
+html,body{height:100%;overflow-x:clip}
 body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.45 var(--f-body);-webkit-tap-highlight-color:transparent}
 body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:10;background:var(--bg)}
 *{box-sizing:border-box}
@@ -67,7 +67,7 @@ h1,h2,h3{font-family:var(--f-display);margin:0;text-wrap:balance;letter-spacing:
 .stack{display:flex;flex-direction:column;gap:12px}
 .row{display:flex;align-items:center;gap:10px}
 .spacer{flex:1}
-#ar-note:empty,#q-list:empty,#h-notes:empty,#f-over:empty,#f-warn:empty,#f-goods-list:empty,#i-notes:empty,#r-notes:empty,#cl-notes:empty,#r-reopen:empty{display:none}
+#f-photo-list:empty,#ar-note:empty,#q-list:empty,#h-notes:empty,#f-over:empty,#f-warn:empty,#f-goods-list:empty,#i-notes:empty,#r-notes:empty,#cl-notes:empty,#cl-left:empty,#r-reopen:empty{display:none}
 .struck{text-decoration:line-through}
 
 /* top bar */
@@ -109,6 +109,7 @@ h1,h2,h3{font-family:var(--f-display);margin:0;text-wrap:balance;letter-spacing:
 .note.bad{background:var(--bad-bg);color:var(--bad)}
 .note.info{background:var(--accent-soft);color:var(--accent)}
 .note b{font-weight:600}
+.note .linkbtn{color:inherit;text-decoration:underline;flex:none;align-self:center;padding:0}
 
 /* list */
 .section-h{display:flex;align-items:baseline;justify-content:space-between;margin-top:6px}
@@ -123,6 +124,7 @@ h1,h2,h3{font-family:var(--f-display);margin:0;text-wrap:balance;letter-spacing:
 .item .s{display:block;font-size:13px;color:var(--muted);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .item .a{font-family:var(--f-mono);font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}
 .item .a.good{color:var(--good)}
+.item .a .tag{margin:2px 0 0;font-family:var(--f-body)}
 .item.storno .t,.item.storno .a{text-decoration:line-through;color:var(--muted)}
 .item.plain{grid-template-columns:1fr auto}
 .tag{display:inline-block;font-size:11px;font-weight:600;padding:1px 6px;border-radius:4px;margin-left:4px;vertical-align:1px}
@@ -164,6 +166,7 @@ textarea.input{min-height:70px;resize:vertical}
 .ifoot{display:flex;justify-content:space-between;align-items:center;font-size:14px}
 .linkbtn{border:0;background:none;color:var(--accent);font-weight:600;cursor:pointer;padding:6px 0;min-height:44px}
 .linkbtn.bad{color:var(--bad)}
+.linkbtn.pick{display:flex;align-items:center;justify-content:center}
 .items-total{display:flex;justify-content:space-between;align-items:baseline;gap:12px;font-weight:600}
 .items-total b{font-family:var(--f-mono);font-weight:500;font-size:17px}
 .peek summary{cursor:pointer;min-height:44px;display:flex;align-items:center;font-weight:600;color:var(--accent)}
@@ -270,10 +273,10 @@ tfoot td{font-weight:600}
 .tab[aria-current="true"]{color:var(--accent)}
 
 .toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(84px + env(safe-area-inset-bottom,0px));background:var(--ink);color:var(--bg);padding:10px 16px;border-radius:10px;font-size:14px;z-index:20;max-width:calc(100% - 32px);box-shadow:0 6px 20px rgba(0,0,0,.25)}
-@keyframes slide-left{from{opacity:.4;transform:translateX(28px)}}
-@keyframes slide-right{from{opacity:.4;transform:translateX(-28px)}}
-.slide-left{animation:slide-left .18s ease-out}
-.slide-right{animation:slide-right .18s ease-out}
+/* Сдвигаются блоки, а не сам экран: transform на нём сломал бы position:fixed у кнопки «Сохранить» */
+.dragging{-webkit-user-select:none;user-select:none}
+.dragging>*,.swipe-bar{transform:translate3d(var(--swipe-x,0),0,0);will-change:transform}
+.settling>*,.swipe-bar.settling{transition:transform var(--swipe-ms,240ms) cubic-bezier(.2,.8,.2,1);pointer-events:none}
 @media (prefers-reduced-motion: reduce){*{transition:none!important;animation:none!important}}
 </style>
 </head>
@@ -299,6 +302,7 @@ tfoot td{font-weight:600}
   <div id="h-notes" class="stack"></div>
   <button class="btn full" id="b-search" type="button"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></svg>Поиск закупок</button>
   <div class="section-h"><h3>Операции периода</h3><span class="muted tnum" id="h-count"></span></div>
+  <button class="linkbtn" type="button" id="h-filter" hidden></button>
   <div class="list" id="h-list"></div>
 </section>
 
@@ -306,6 +310,8 @@ tfoot td{font-weight:600}
 <section id="v-new" class="stack" hidden>
   <div class="top"><button class="back" type="button" id="f-back" data-go="home">‹ Назад</button><h2 id="n-title">Новая закупка</h2><span class="spacer"></span><span class="label num" id="n-no"></span></div>
   <div class="field"><span class="label">Что покупаем</span><div class="chips" id="f-type"></div></div>
+  <div class="field" id="f-date-field" hidden><label class="label" for="f-date">Дата закупки</label>
+    <input class="input" id="f-date" type="date"></div>
   <div class="field"><label class="label" for="f-name" id="f-name-label">Наименование товара</label>
     <input class="input" id="f-name" placeholder="Например, профлист С21" autocomplete="off" autocapitalize="sentences" autocorrect="off" spellcheck="false" enterkeyhint="next">
     <div class="suggest" id="f-name-suggest"></div></div>
@@ -315,7 +321,9 @@ tfoot td{font-weight:600}
       <span class="ic"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg></span>
       <span><b id="f-goods-title">Сфотографировать товар</b><br><span class="muted hint">Необязательно. Можно несколько снимков.</span></span>
     </label>
-    <input class="file-input" type="file" id="f-goods" accept="image/*" capture="environment" tabindex="-1" aria-label="Фото товара"></div>
+    <input class="file-input" type="file" id="f-goods" accept="image/*" capture="environment" tabindex="-1" aria-label="Фото товара">
+    <label class="linkbtn pick" for="f-goods-lib">Выбрать из галереи</label>
+    <input class="file-input" type="file" id="f-goods-lib" accept="image/*" multiple tabindex="-1" aria-label="Фото товара из галереи"></div>
   <div class="field"><label class="label" for="f-supplier" id="f-supplier-label">Поставщик</label>
     <input class="input" id="f-supplier" placeholder="Начните вводить название" autocomplete="off" autocapitalize="sentences" autocorrect="off" spellcheck="false" enterkeyhint="next">
     <div class="suggest" id="f-supplier-suggest"></div></div>
@@ -331,20 +339,15 @@ tfoot td{font-weight:600}
   <div id="f-over"></div>
   <div class="field"><span class="label">Документ</span><div class="chips" id="f-doc"></div></div>
   <div class="field"><span class="label">Оплата</span><div class="chips" id="f-pay"></div></div>
-  <div id="f-receipt-block" class="stack">
-  <span class="label">Фото чека</span>
-  <label class="photo" for="f-photo">
-    <span class="photo-state" id="f-photo-empty">
+  <div class="field" id="f-receipt-block"><span class="label">Фото чека</span>
+    <div class="thumbs" id="f-photo-list"></div>
+    <label class="photo" for="f-photo">
       <span class="ic"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg></span>
-      <span><b>Сфотографировать чек</b><br><span class="muted hint">Резервная копия. Бумажный чек сдаётся в бухгалтерию.</span></span>
-    </span>
-    <span class="photo-state" id="f-photo-done" hidden>
-      <img id="f-photo-img" alt="Фото чека">
-      <span><b>Фото прикреплено</b><br><span class="muted hint">Нажмите, чтобы переснять</span></span>
-    </span>
-  </label>
-  <input class="file-input" type="file" id="f-photo" accept="image/*" capture="environment" tabindex="-1" aria-label="Фото чека">
-  </div>
+      <span><b id="f-photo-title">Сфотографировать чек</b><br><span class="muted hint">Резервная копия. Можно несколько снимков.</span></span>
+    </label>
+    <input class="file-input" type="file" id="f-photo" accept="image/*" capture="environment" tabindex="-1" aria-label="Фото чека">
+    <label class="linkbtn pick" for="f-photo-lib">Выбрать из галереи</label>
+    <input class="file-input" type="file" id="f-photo-lib" accept="image/*" multiple tabindex="-1" aria-label="Фото чека из галереи"></div>
   <div class="field"><label class="label" for="f-comment">Комментарий</label>
     <textarea class="input" id="f-comment" placeholder="Необязательно"></textarea></div>
   <div id="f-warn" class="stack"></div>
@@ -447,6 +450,7 @@ tfoot td{font-weight:600}
   <div id="cl-notes" class="stack"></div>
   <div class="field"><label class="label" for="cl-ret">Возврат остатка в кассу, сом</label>
     <input class="input big" id="cl-ret" inputmode="decimal" autocomplete="off"></div>
+  <div id="cl-left"></div>
   <label class="switch" for="cl-check"><span id="cl-check-l"></span><input type="checkbox" id="cl-check"></label>
   <button class="btn full" type="button" id="cl-backup">Сохранить бэкап</button>
   <button class="btn danger full" type="button" id="cl-do" disabled>Закрыть период</button>
