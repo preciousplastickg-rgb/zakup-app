@@ -67,7 +67,7 @@ h1,h2,h3{font-family:var(--f-display);margin:0;text-wrap:balance;letter-spacing:
 .stack{display:flex;flex-direction:column;gap:12px}
 .row{display:flex;align-items:center;gap:10px}
 .spacer{flex:1}
-#q-list:empty,#h-notes:empty,#f-over:empty,#f-warn:empty,#f-goods-list:empty,#i-notes:empty,#r-notes:empty,#cl-notes:empty,#r-reopen:empty{display:none}
+#ar-note:empty,#q-list:empty,#h-notes:empty,#f-over:empty,#f-warn:empty,#f-goods-list:empty,#i-notes:empty,#r-notes:empty,#cl-notes:empty,#r-reopen:empty{display:none}
 .struck{text-decoration:line-through}
 
 /* top bar */
@@ -465,7 +465,13 @@ tfoot td{font-weight:600}
   <button class="btn full" type="button" id="s-backup">Сохранить копию данных</button>
   <label class="btn full" for="s-restore">Восстановить из копии</label>
   <input class="file-input" type="file" id="s-restore" accept=".zip,application/zip" tabindex="-1" aria-label="Файл бэкапа">
+  <div class="section-h"><h3>Место на телефоне</h3></div>
+  <p class="muted hint" id="s-usage"></p>
+  <button class="btn full" type="button" id="s-archive">Архивировать закрытые периоды</button>
+  <label class="btn full" for="s-unarchive">Загрузить архив</label>
+  <input class="file-input" type="file" id="s-unarchive" accept=".zip,application/zip" tabindex="-1" aria-label="Файл архива">
   <button class="btn full" type="button" id="s-log">Журнал изменений</button>
+  <button class="btn danger full" type="button" id="s-wipe">Удалить все записи</button>
 </section>
 
 <!-- DICTIONARY ENTRY -->
@@ -488,6 +494,36 @@ tfoot td{font-weight:600}
   <div class="sum" id="rs-sum"></div>
   <button class="btn full" type="button" id="rs-backup">Сначала сохранить текущие данные</button>
   <button class="btn danger full" type="button" id="rs-do">Заменить все данные</button>
+</section>
+
+<!-- ARCHIVE -->
+<section id="v-archive" class="stack" hidden>
+  <div class="top"><button class="back" type="button" data-go="more">‹ Настройки</button><h2>Архив</h2></div>
+  <p class="muted hint">Закрытые периоды сжимаются в один файл. Сохраните его в «Файлы» или iCloud. После этого записи можно убрать из приложения и освободить место, а при необходимости загрузить обратно. Открытый период не затрагивается.</p>
+  <div class="sum" id="ar-sum"></div>
+  <div id="ar-note" class="stack"></div>
+  <button class="btn primary full" type="button" id="ar-make">Создать архив</button>
+  <button class="btn danger full" type="button" id="ar-remove" hidden>Убрать из приложения</button>
+</section>
+
+<!-- UNARCHIVE -->
+<section id="v-unarchive" class="stack" hidden>
+  <div class="top"><button class="back" type="button" data-go="more">‹ Настройки</button><h2>Загрузка архива</h2></div>
+  <p class="muted hint">Записи из архива добавятся к текущим. Текущие записи не изменятся.</p>
+  <div class="sum" id="ua-sum"></div>
+  <button class="btn primary full" type="button" id="ua-do">Загрузить в приложение</button>
+</section>
+
+<!-- WIPE -->
+<section id="v-wipe" class="stack" hidden>
+  <div class="top"><button class="back" type="button" data-go="more">‹ Настройки</button><h2>Удаление записей</h2></div>
+  <div class="note bad"><span>Будут удалены все закупки, выдачи, периоды, фото, поставщики и журнал изменений. Нумерация начнётся с №001. Отменить это нельзя.</span></div>
+  <div class="sum" id="w-sum"></div>
+  <p class="muted hint">ФИО, организация и базары останутся.</p>
+  <button class="btn full" type="button" id="w-backup">Сначала сохранить копию</button>
+  <div class="field"><label class="label" for="w-word">Для подтверждения введите слово УДАЛИТЬ</label>
+    <input class="input" id="w-word" autocomplete="off" autocorrect="off" autocapitalize="characters" spellcheck="false"></div>
+  <button class="btn danger full" type="button" id="w-do" disabled>Удалить все записи</button>
 </section>
 
 <!-- LOG -->

@@ -285,6 +285,83 @@ function saveBazaar(id, changes) {
   });
 }
 
+// Удаление ошибочной записи. Номер не освобождается: он мог уже попасть на бумажный чек.
+function deletePurchase(id) {
+  return db.transaction('rw', db.purchases, db.periods, db.photos, db.auditLog, async () => {
+    const purchase = await db.purchases.get(id);
+    const period = await db.periods.get(purchase.periodId);
+    if (period.status !== 'open') throw new Error('Период закрыт');
+    await db.photos.where('purchaseId').equals(id).delete();
+    await db.purchases.delete(id);
+    const label = `№${String(purchase.no).padStart(3, '0')} ${purchaseTitle(purchase)}, ${money(purchase.amount)} сом`;
+    await db.auditLog.add({ entity: 'purchase', entityId: id, field: 'deleted', before: label, after: null, at: nowLocal() });
+  });
+}
+
+function deleteAdvance(id) {
+  return db.transaction('rw', db.advances, db.periods, db.auditLog, async () => {
+    const advance = await db.advances.get(id);
+    const period = await db.periods.get(advance.periodId);
+    if (period.status !== 'open') throw new Error('Период закрыт');
+    await db.advances.delete(id);
+    await db.auditLog.add({ entity: 'advance', entityId: id, field: 'deleted', before: `${money(advance.amount)} сом от ${advance.date}`, after: null, at: nowLocal() });
+  });
+}
+
+// Закрытые периоды уходят в архивный файл. Счётчики не трогаем: номера не должны повториться.
+function removeArchivedPeriods(periodIds, label) {
+  return db.transaction('rw', db.periods, db.advances, db.purchases, db.photos, db.auditLog, async () => {
+    const purchaseIds = await db.purchases.where('periodId').anyOf(periodIds).primaryKeys();
+    await db.photos.where('purchaseId').anyOf(purchaseIds).delete();
+    await db.auditLog.filter(e => (e.entity === 'purchase' && purchaseIds.includes(e.entityId)) || (e.entity === 'period' && periodIds.includes(e.entityId))).delete();
+    await db.purchases.where('periodId').anyOf(periodIds).delete();
+    await db.advances.where('periodId').anyOf(periodIds).delete();
+    await db.periods.bulkDelete(periodIds);
+    await db.auditLog.add({ entity: 'archive', entityId: 0, field: 'toArchive', before: null, after: label, at: nowLocal() });
+  });
+}
+
+// Архив добавляется к текущим данным с новыми id, поставщики сопоставляются по имени.
+function mergeArchive({ tables }, label) {
+  return db.transaction('rw', [db.periods, db.advances, db.purchases, db.photos, db.suppliers, db.auditLog], async () => {
+    for (const p of tables.purchases) {
+      if (await db.purchases.get({ year: p.year, no: p.no })) throw new BackupError(`Номер №${String(p.no).padStart(3, '0')} за ${p.year} год уже занят.`);
+    }
+    const stripId = ({ id, ...record }) => record;
+    const periodIds = new Map();
+    for (const period of tables.periods) {
+      if (await db.periods.where('number').equals(period.number).count()) throw new BackupError(`Период ${period.number} уже есть в приложении.`);
+      periodIds.set(period.id, await db.periods.add(stripId(period)));
+    }
+    const supplierIds = new Map();
+    for (const supplier of tables.suppliers) {
+      const known = await db.suppliers.where('name').equalsIgnoreCase(supplier.name).first();
+      supplierIds.set(supplier.id, known ? known.id : await db.suppliers.add(stripId(supplier)));
+    }
+    for (const advance of tables.advances) await db.advances.add({ ...stripId(advance), periodId: periodIds.get(advance.periodId) });
+    const purchaseIds = new Map();
+    for (const purchase of tables.purchases) {
+      purchaseIds.set(purchase.id, await db.purchases.add({ ...stripId(purchase), periodId: periodIds.get(purchase.periodId), supplierId: supplierIds.get(purchase.supplierId) }));
+    }
+    for (const photo of tables.photos) await db.photos.add({ ...stripId(photo), purchaseId: purchaseIds.get(photo.purchaseId) });
+    for (const entry of tables.auditLog) {
+      const ids = entry.entity === 'period' ? periodIds : purchaseIds;
+      await db.auditLog.add({ ...stripId(entry), entityId: ids.get(entry.entityId) });
+    }
+    await db.auditLog.add({ entity: 'archive', entityId: 0, field: 'fromArchive', before: null, after: label, at: nowLocal() });
+  });
+}
+
+// Чистый старт перед работой: всё учётное стирается, нумерация начинается заново.
+// ФИО, организация и базары остаются: это настройки, а не записи.
+function wipeRecords() {
+  const tables = [db.periods, db.advances, db.purchases, db.photos, db.suppliers, db.counters, db.auditLog];
+  return db.transaction('rw', [...tables, db.settings], async () => {
+    await Promise.all(tables.map(table => table.clear()));
+    await db.settings.delete('lastBackupAt');
+  });
+}
+
 const setSetting = (key, value) => db.settings.put({ key, value });
 
 function openNewPeriod() {

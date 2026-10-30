@@ -6,7 +6,7 @@ const PAY = { cash: 'Наличные', transfer: 'Перевод' };
 const ADV_METHOD = { cash: 'Наличные', transfer: 'Перевод на карту' };
 const TYPES = { goods: 'Товар', service: 'Услуга' };
 const UNITS = ['шт', 'м', 'п.м.', 'м²', 'м³', 'кг', 'т', 'л', 'уп.', 'лист', 'меш.', 'рулон', 'рейс', 'час', 'услуга'];
-const VIEWS = ['home', 'new', 'done', 'card', 'search', 'adv', 'items', 'report', 'close', 'more', 'dict', 'restore', 'log'];
+const VIEWS = ['home', 'new', 'done', 'card', 'search', 'adv', 'items', 'report', 'close', 'more', 'dict', 'restore', 'archive', 'unarchive', 'wipe', 'log'];
 const TABS = ['home', 'report', 'more'];
 const PHOTO_MAX_SIDE = 1600;
 const PHOTO_QUALITY = 0.7;
@@ -19,6 +19,23 @@ const pad3 = n => String(n).padStart(3, '0');
 const dShort = iso => { const [, m, d] = iso.slice(0, 10).split('-'); return `${d}.${m}`; };
 const dFull = iso => { const [y, m, d] = iso.slice(0, 10).split('-'); return `${d}.${m}.${y}`; };
 const radioVal = name => (document.querySelector(`input[name="${name}"]:checked`) || {}).value;
+
+// Опасное действие требует второго нажатия, и случайный двойной тап за него не считается.
+function confirmTwice(button, label, confirmLabel, action) {
+  let armedAt = 0;
+  button.textContent = label;
+  button.onclick = async () => {
+    if (!armedAt) {
+      armedAt = Date.now();
+      button.textContent = confirmLabel;
+      button.className = 'btn warnb full';
+      return;
+    }
+    if (Date.now() - armedAt < DOUBLE_TAP_MS) return;
+    button.disabled = true;
+    await action();
+  };
+}
 
 function plural(n, one, few, many) {
   const a = n % 100, b = n % 10;
@@ -74,7 +91,7 @@ document.addEventListener('visibilitychange', () => {
 function renderOperation({ kind, x }) {
   if (kind === 'advance') {
     const tag = x.method === 'cash' ? 'нал' : 'перевод';
-    return `<div class="item static"><span class="no">${dShort(x.date)}</span><span class="body"><span class="t">Выдача аванса<span class="tag adv">${tag}</span></span><span class="s">${esc(x.by)}</span></span><span class="a good">+${money(x.amount)}</span></div>`;
+    return `<button class="item" type="button" data-advance="${x.id}"><span class="no">${dShort(x.date)}</span><span class="body"><span class="t">Выдача аванса<span class="tag adv">${tag}</span></span><span class="s">${esc(x.by)}</span></span><span class="a good">+${money(x.amount)}</span></button>`;
   }
   const storno = x.status === 'storno';
   const noDoc = x.docType === 'none';
@@ -132,6 +149,8 @@ $('b-newp').onclick = async () => {
   toast('Открыт новый период. Добавьте выдачу аванса.');
 };
 $('h-list').addEventListener('click', e => {
+  const advance = e.target.closest('[data-advance]');
+  if (advance) openAdvanceCard(Number(advance.dataset.advance));
   const b = e.target.closest('[data-card]');
   if (!b) return;
   cardBack = 'home';
@@ -297,18 +316,18 @@ async function openEdit(id) {
 }
 
 // Через Image, а не createImageBitmap: так Safari учитывает поворот из EXIF.
-function compressPhoto(file) {
+function compressPhoto(file, maxSide = PHOTO_MAX_SIDE, quality = PHOTO_QUALITY) {
   return new Promise((resolve, reject) => {
     const url = URL.createObjectURL(file);
     const img = new Image();
     img.onload = () => {
-      const scale = Math.min(1, PHOTO_MAX_SIDE / Math.max(img.naturalWidth, img.naturalHeight));
+      const scale = Math.min(1, maxSide / Math.max(img.naturalWidth, img.naturalHeight));
       const canvas = document.createElement('canvas');
       canvas.width = Math.round(img.naturalWidth * scale);
       canvas.height = Math.round(img.naturalHeight * scale);
       canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
       URL.revokeObjectURL(url);
-      canvas.toBlob(blob => (blob ? resolve(blob) : reject(new Error('toBlob вернул null'))), 'image/jpeg', PHOTO_QUALITY);
+      canvas.toBlob(blob => (blob ? resolve(blob) : reject(new Error('toBlob вернул null'))), 'image/jpeg', quality);
     };
     img.onerror = () => {
       URL.revokeObjectURL(url);
@@ -568,6 +587,7 @@ const AUDIT_FIELDS = {
   type: 'Тип', goodsName: 'Наименование', amount: 'Сумма', supplierId: 'Поставщик', place: 'Базар', purposeId: 'Назначение', docType: 'Документ',
   payment: 'Оплата', comment: 'Комментарий', items: 'Позиции', status: 'Статус', stornoReason: 'Причина сторно',
   name: 'Название', phone: 'Телефон', archived: 'В архиве', active: 'Действует',
+  deleted: 'Удалена запись', toArchive: 'В архив', fromArchive: 'Из архива',
   ret: 'Возврат', closed: 'Дата закрытия', revision: 'Редакция', reopenReason: 'Причина переоткрытия',
 };
 const AUDIT_STATUS = { active: 'Активна', storno: 'Сторно', open: 'Открыт', closed: 'Закрыт' };
@@ -602,8 +622,13 @@ function auditValue(field, value, ctx) {
 }
 
 function auditSubject(e, ctx) {
-  if (e.entity === 'purchase') return `Закупка №${pad3(ctx.purchases.get(e.entityId).no)}`;
-  if (e.entity === 'period') return `Период ${ctx.periods.get(e.entityId)}`;
+  if (e.entity === 'archive') return 'Архив';
+  if (e.entity === 'advance') return 'Выдача аванса';
+  if (e.entity === 'purchase') {
+    const purchase = ctx.purchases.get(e.entityId);
+    return purchase ? `Закупка №${pad3(purchase.no)}` : 'Закупка (удалена)';
+  }
+  if (e.entity === 'period') return `Период ${ctx.periods.get(e.entityId) || ''}`;
   if (e.entity === 'supplier') return `Поставщик «${ctx.suppliers.get(e.entityId)}»`;
   if (e.entity === 'bazaar') return `Базар «${ctx.bazaars.get(e.entityId)}»`;
   return `Назначение «${ctx.purposes.get(e.entityId)}»`;
@@ -698,12 +723,46 @@ async function openCard(id) {
     (history.length
       ? `<div class="section-h"><h3>История изменений</h3></div><div class="list">${history.map(e => renderAudit(e, ctx, false)).join('')}</div>`
       : '') +
-    (editable ? '<div id="c-storno" class="stack"><button class="btn danger full" type="button" id="c-st-open">Сторнировать</button></div>' : '');
+    (editable ? '<div id="c-storno" class="stack"><button class="btn danger full" type="button" id="c-st-open">Сторнировать</button></div>' : '') +
+    (period.status === 'open' ? '<button class="btn danger full" type="button" id="c-delete"></button>' : '<p class="muted hint">Чтобы изменить или удалить запись закрытого периода, сначала переоткройте его в Отчёте.</p>');
   if (editable) {
     $('c-items').onclick = () => openItems(id);
     $('c-edit').onclick = () => openEdit(id);
     $('c-repeat').onclick = () => openNew({ type: x.type, goodsName: x.goodsName, supplierName: supplier.name });
     $('c-st-open').onclick = () => openStorno(x);
+  }
+  if (period.status === 'open') {
+    confirmTwice($('c-delete'), 'Удалить запись', `Нажмите ещё раз: удалить №${pad3(x.no)} насовсем`, async () => {
+      await deletePurchase(id);
+      await NAV[cardBack]();
+      toast(`Закупка №${pad3(x.no)} удалена. Этот номер больше не выдаётся.`);
+    });
+  }
+  show('card');
+}
+
+async function openAdvanceCard(id) {
+  const x = await db.advances.get(id);
+  const period = await db.periods.get(x.periodId);
+  const row = (dt, dd) => `<div><dt>${dt}</dt><dd>${dd}</dd></div>`;
+  releaseViewPhotos();
+  $('c-back').dataset.go = 'home';
+  $('c-title').textContent = 'Выдача аванса';
+  $('c-body').innerHTML =
+    `<div class="row"><span class="amount-hero">${money(x.amount)} сом</span></div>` +
+    '<dl class="kv">' +
+    row('Дата', dFull(x.date)) +
+    row('Способ', ADV_METHOD[x.method]) +
+    row('Кто выдал', esc(x.by)) +
+    row('Период', esc(period.number)) +
+    '</dl>' +
+    (period.status === 'open' ? '<button class="btn danger full" type="button" id="c-delete"></button>' : '');
+  if (period.status === 'open') {
+    confirmTwice($('c-delete'), 'Удалить запись', 'Нажмите ещё раз: удалить выдачу насовсем', async () => {
+      await deleteAdvance(id);
+      await showHome();
+      toast('Выдача удалена');
+    });
   }
   show('card');
 }
@@ -1393,6 +1452,9 @@ async function showMore() {
   $('s-name').value = userName || '';
   $('s-org').value = org || '';
   $('s-sup-n').textContent = suppliers.length;
+  const photoSize = await db.photos.toArray().then(list => list.reduce((sum, p) => sum + p.blob.size, 0));
+  const closedCount = await db.periods.where('status').equals('closed').count();
+  $('s-usage').textContent = `Фото занимают ${formatSize(photoSize)}. Закрытых периодов: ${closedCount}.`;
   $('s-backup-note').textContent = `Данные хранятся только на этом телефоне. Последняя копия: ${lastBackupAt ? dFull(lastBackupAt) : 'ещё не делалась'}.`;
   $('s-baz').innerHTML = bazaars.sort(byName).map(b =>
     `<button class="item plain" type="button" data-dict="bazaar" data-id="${b.id}"><span class="t">${esc(b.name)}${b.active ? '' : '<span class="tag warn">архив</span>'}</span></button>`
@@ -1471,6 +1533,138 @@ $('rs-do').onclick = async () => {
   restore.backup = null;
   await showHome();
   toast('Данные восстановлены из копии');
+};
+
+/* Архив: место на телефоне освобождается, а записи можно вернуть */
+
+const formatSize = bytes => (bytes < 1048576 ? `${Math.max(Math.round(bytes / 1024), 1)} КБ` : `${(bytes / 1048576).toFixed(1).replace('.', ',')} МБ`);
+
+const archive = { built: null, unpack: null };
+
+async function openArchive() {
+  const { periods, purchases, photos, size } = await closedPeriodsData();
+  const row = (label, value) => `<div><span>${label}</span><span class="v">${value}</span></div>`;
+  archive.built = null;
+  $('ar-sum').innerHTML = row('Закрытые периоды', periods.length) + row('Закупки', purchases.length) + row('Фото', `${photos.length}, ${formatSize(size)}`);
+  $('ar-note').innerHTML = periods.length ? '' : '<div class="note warn"><span>Закрытых периодов пока нет. Архивируются только закрытые.</span></div>';
+  $('ar-make').hidden = !periods.length;
+  $('ar-make').disabled = false;
+  $('ar-make').textContent = 'Создать архив';
+  $('ar-remove').hidden = true;
+  show('archive');
+}
+
+$('s-archive').onclick = openArchive;
+
+$('ar-make').onclick = async () => {
+  const button = $('ar-make');
+  button.disabled = true;
+  try {
+    const built = archive.built || await buildArchive((i, n) => { button.textContent = `Сжатие фото ${i} из ${n}`; });
+    archive.built = built;
+    button.textContent = 'Проверка архива…';
+    const check = await readArchive(built.file);
+    if (check.tables.periods.length !== built.periodIds.length) throw new Error('Архив не совпал с данными');
+    button.textContent = 'Сохраните файл';
+    if (!(await deliverFile(built.file))) {
+      button.textContent = 'Сохранить архив';
+      button.disabled = false;
+      return;
+    }
+  } catch (err) {
+    console.error(err);
+    toast('Архив не создался. Записи не изменились.');
+    button.textContent = 'Создать архив';
+    button.disabled = false;
+    return;
+  }
+  const { before, after } = archive.built;
+  $('ar-note').innerHTML = `<div class="note warn"><span>Файл создан: фото ${formatSize(before)} → ${formatSize(after)}. Убедитесь, что он сохранён в «Файлах», и только потом убирайте записи из приложения.</span></div>`;
+  button.hidden = true;
+  $('ar-remove').hidden = false;
+  $('ar-remove').disabled = false;
+  $('ar-remove').className = 'btn danger full';
+  confirmTwice($('ar-remove'), 'Убрать из приложения', 'Нажмите ещё раз: файл сохранён, убрать', async () => {
+    await removeArchivedPeriods(archive.built.periodIds, archive.built.label);
+    archive.built = null;
+    await showMore();
+    toast('Закрытые периоды убраны из приложения');
+  });
+};
+
+$('s-unarchive').addEventListener('change', async e => {
+  const file = takePickedFile(e.target);
+  if (!file) return;
+  try {
+    archive.unpack = await readArchive(file);
+  } catch (err) {
+    if (!(err instanceof BackupError)) console.error(err);
+    toast(err instanceof BackupError ? err.message : 'Не удалось прочитать архив.');
+    return;
+  }
+  const { tables, exportedAt } = archive.unpack;
+  const row = (label, value) => `<div><span>${label}</span><span class="v">${value}</span></div>`;
+  $('ua-sum').innerHTML = row('Архив от', esc(dFull(exportedAt))) +
+    row('Периоды', esc(tables.periods.map(p => p.number).join(', '))) +
+    row('Закупки', tables.purchases.length) + row('Фото', tables.photos.length);
+  $('ua-do').disabled = false;
+  show('unarchive');
+});
+
+$('ua-do').onclick = async () => {
+  const button = $('ua-do');
+  if (button.disabled) return;
+  button.disabled = true;
+  const { tables } = archive.unpack;
+  try {
+    await mergeArchive(archive.unpack, tables.periods.map(p => p.number).join(', '));
+  } catch (err) {
+    if (!(err instanceof BackupError)) console.error(err);
+    toast(err instanceof BackupError ? err.message : 'Архив не загрузился. Текущие записи не изменились.');
+    button.disabled = false;
+    return;
+  }
+  archive.unpack = null;
+  await showMore();
+  toast('Архив загружен');
+};
+
+/* Удаление всех записей: чистый старт после пробы */
+
+let wiping = false;
+
+async function openWipe() {
+  const [periods, purchases, photos] = await Promise.all([db.periods.count(), db.purchases.count(), db.photos.count()]);
+  const row = (label, value) => `<div><span>${label}</span><span class="v">${value}</span></div>`;
+  $('w-sum').innerHTML = row('Периоды', periods) + row('Закупки', purchases) + row('Фото', photos);
+  $('w-backup').textContent = 'Сначала сохранить копию';
+  $('w-word').value = '';
+  $('w-do').disabled = true;
+  show('wipe');
+}
+
+$('s-wipe').onclick = openWipe;
+$('w-backup').onclick = e => runBackup(e.currentTarget, async () => { $('w-backup').textContent = 'Копия сохранена ✓'; });
+$('w-word').addEventListener('input', e => {
+  $('w-do').disabled = e.target.value.trim().toUpperCase() !== 'УДАЛИТЬ';
+});
+
+$('w-do').onclick = async () => {
+  if (wiping) return;
+  wiping = true;
+  $('w-do').disabled = true;
+  try {
+    await wipeRecords();
+  } catch (err) {
+    console.error(err);
+    toast('Удалить не удалось. Записи не изменились.');
+    return;
+  } finally {
+    wiping = false;
+  }
+  form.lastSaved = null;
+  await showHome();
+  toast('Все записи удалены');
 };
 
 $('s-name').onchange = e => setSetting('userName', e.target.value.trim());
