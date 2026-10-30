@@ -63,10 +63,20 @@ function chips(el, name, options, value, warnKey) {
 
 let currentView = null;
 let swipeDirection = null;
+let viewSnapshot = '';
+let swipeLeaveAt = 0;
+
+// Значения полей экрана: по ним видно, ввёл ли человек что-то после открытия.
+function snapshotView(view) {
+  const fields = [...$('v-' + view).querySelectorAll('input:not([type="file"]), textarea, select')];
+  return fields.filter(f => (f.type === 'radio' || f.type === 'checkbox' ? f.checked : f.value)).map(f => `${f.id || f.name}=${f.value}`).join('|');
+}
 
 function show(view) {
   VIEWS.forEach(v => { $('v-' + v).hidden = v !== view; });
   currentView = view;
+  viewSnapshot = snapshotView(view);
+  swipeLeaveAt = 0;
   if (swipeDirection) {
     const section = $('v-' + view);
     section.classList.add('slide-' + swipeDirection);
@@ -95,13 +105,38 @@ document.addEventListener('click', e => {
 
 const SWIPE_MIN_PX = 70;
 const SWIPE_MAX_MS = 600;
-// Здесь палец и так ходит вбок: листают таблицу, ведут по графику, двигают курсор в поле.
-const SWIPE_IGNORE = '.scroll, .plot, input, textarea, select';
+const SWIPE_LEAVE_MS = 4000;
+// Здесь палец и так ходит вбок: ведут по графику, двигают курсор в поле.
+const SWIPE_IGNORE = '.plot, input, textarea, select';
 let swipeStart = null;
+
+// Таблица мешает свайпу, только если её действительно есть куда листать.
+function scrollsSideways(target) {
+  const box = target.closest('.scroll');
+  return !!box && box.scrollWidth > box.clientWidth;
+}
+
+function hasUnsavedInput() {
+  return viewSnapshot !== snapshotView(currentView) || (currentView === 'new' && form.photoJobs.length > 0);
+}
+
+// Свайп вправо на внутреннем экране работает как «Назад». Введённое не теряется от случайного жеста:
+// сначала предупреждение, выход только по второму свайпу.
+function swipeBack() {
+  const back = $('v-' + currentView).querySelector('.back, [data-go]');
+  if (!back) return;
+  if (currentView !== 'search' && hasUnsavedInput() && Date.now() - swipeLeaveAt > SWIPE_LEAVE_MS) {
+    swipeLeaveAt = Date.now();
+    toast('Введённое не сохранено. Свайпните ещё раз, чтобы выйти.');
+    return;
+  }
+  swipeDirection = 'right';
+  back.click();
+}
 
 document.addEventListener('touchstart', e => {
   swipeStart = null;
-  if (e.touches.length !== 1 || !TABS.includes(currentView) || e.target.closest(SWIPE_IGNORE)) return;
+  if (e.touches.length !== 1 || e.target.closest(SWIPE_IGNORE) || scrollsSideways(e.target)) return;
   swipeStart = { x: e.touches[0].clientX, y: e.touches[0].clientY, at: Date.now() };
 }, { passive: true });
 
@@ -113,6 +148,10 @@ document.addEventListener('touchend', e => {
   swipeStart = null;
   // Наклонное движение — это прокрутка страницы, а не свайп.
   if (!quick || Math.abs(dx) < SWIPE_MIN_PX || Math.abs(dx) < Math.abs(dy) * 2) return;
+  if (!TABS.includes(currentView)) {
+    if (dx > 0) swipeBack();
+    return;
+  }
   const next = TABS[TABS.indexOf(currentView) + (dx < 0 ? 1 : -1)];
   if (!next) return;
   swipeDirection = dx < 0 ? 'left' : 'right';
