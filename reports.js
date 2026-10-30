@@ -24,20 +24,12 @@ function loadVendor(src) {
 }
 
 async function buildReport(period) {
-  const [summary, suppliers, userName, org] = await Promise.all([
+  const [summary, userName, org] = await Promise.all([
     periodSummary(period),
-    db.suppliers.toArray(),
     getSetting('userName'),
     getSetting('org'),
   ]);
-  const supplierById = new Map(suppliers.map(s => [s.id, s]));
-  const purchases = summary.purchases
-    .slice()
-    .sort((a, b) => a.id - b.id)
-    .map(p => {
-      const supplier = supplierById.get(p.supplierId);
-      return { ...p, title: purchaseTitle(p), supplier: supplier.name, phone: supplier.phone };
-    });
+  const purchases = await withSuppliers(summary.purchases);
   const active = purchases.filter(p => p.status === 'active');
   const storno = purchases.filter(p => p.status === 'storno');
 
@@ -66,7 +58,9 @@ const reportTitle = p => (p.type === 'service' ? `Услуга: ${p.title}` : p.
 /* Статистика для экрана «Отчёт». В файлы для бухгалтерии не попадает. */
 
 const STAT_TOP = 5;
-const STAT_DAILY_LIMIT = 21;
+const STAT_DAILY_LIMIT = 31;
+const STAT_WEEKLY_LIMIT = 182;
+const STAT_MONTHLY_LIMIT = 930;
 
 const dateOf = iso => {
   const [y, m, d] = iso.slice(0, 10).split('-').map(Number);
@@ -74,26 +68,32 @@ const dateOf = iso => {
 };
 const daysBetween = (from, to) => Math.round((dateOf(to) - dateOf(from)) / 864e5);
 
-function isoPlusDays(iso, days) {
-  const d = dateOf(iso);
-  d.setDate(d.getDate() + days);
+function isoDate(d) {
   const z = n => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${z(d.getMonth() + 1)}-${z(d.getDate())}`;
 }
 
-// Длинный период показывается по неделям: на экране телефона больше 21 столбца не прочитать.
-function spendingBuckets(r) {
-  const days = daysBetween(r.period.opened, r.end) + 1;
-  const step = days <= STAT_DAILY_LIMIT ? 1 : 7;
+function isoPlusDays(iso, days) {
+  const d = dateOf(iso);
+  d.setDate(d.getDate() + days);
+  return isoDate(d);
+}
+
+// Столбцов не больше 31, иначе на телефоне их не прочитать: длинный диапазон укрупняется.
+function spendingBuckets(active, from, to) {
+  const days = daysBetween(from, to) + 1;
+  const step = days <= STAT_DAILY_LIMIT ? 1 : days <= STAT_WEEKLY_LIMIT ? 7 : days <= STAT_MONTHLY_LIMIT ? 30 : 365;
   const buckets = Array.from({ length: Math.ceil(days / step) }, (_, i) => {
-    const from = isoPlusDays(r.period.opened, i * step);
-    return { label: step === 1 ? dShort(from) : `${dShort(from)}–${dShort(isoPlusDays(from, step - 1))}`, sum: 0 };
+    const start = isoPlusDays(from, i * step);
+    const end = isoPlusDays(start, step - 1);
+    const label = step === 1 ? dShort(start) : step === 365 ? `${dFull(start)}–${dFull(end)}` : `${dShort(start)}–${dShort(end)}`;
+    return { label, sum: 0 };
   });
-  r.active.forEach(p => {
-    const i = Math.floor(daysBetween(r.period.opened, p.dt) / step);
+  active.forEach(p => {
+    const i = Math.floor(daysBetween(from, p.dt) / step);
     buckets[Math.min(Math.max(i, 0), buckets.length - 1)].sum += p.amount;
   });
-  return { buckets, weekly: step > 1 };
+  return { buckets, unit: { 1: 'дням', 7: 'неделям', 30: 'месяцам', 365: 'годам' }[step] };
 }
 
 // Первые пять по сумме, остальное одной строкой: ряды длиннее на телефоне не читаются.
@@ -106,16 +106,36 @@ function rankTop(pairs) {
   return rest ? [...top, { name: 'Прочие', amount: rest, other: true }] : top;
 }
 
-function reportStats(r) {
+function reportStats(active, from, to) {
+  const spent = sumAmounts(active);
+  const services = sumAmounts(active.filter(p => p.type === 'service'));
   return {
-    ...spendingBuckets(r),
-    goodsSum: r.spent - r.services,
+    ...spendingBuckets(active, from, to),
+    spent,
+    services,
+    goodsSum: spent - services,
+    count: active.length,
     top: {
-      suppliers: rankTop(r.active.map(p => [p.supplier, p.amount])),
-      bazaars: rankTop(r.active.filter(p => p.type !== 'service').map(p => [p.place || 'Не указан', p.amount])),
-      goods: rankTop(r.active.flatMap(p => (p.items.length ? p.items.map(i => [i.name, i.sum]) : [[p.title || 'Без названия', p.amount]]))),
+      suppliers: rankTop(active.map(p => [p.supplier, p.amount])),
+      bazaars: rankTop(active.filter(p => p.type !== 'service').map(p => [p.place || 'Не указан', p.amount])),
+      goods: rankTop(active.flatMap(p => (p.items.length ? p.items.map(i => [i.name, i.sum]) : [[p.title || 'Без названия', p.amount]]))),
     },
   };
+}
+
+// Закупки с именами поставщиков, нужными отчёту и статистике.
+async function withSuppliers(purchases) {
+  const suppliers = new Map((await db.suppliers.toArray()).map(s => [s.id, s]));
+  return purchases.slice().sort((a, b) => a.id - b.id).map(p => {
+    const supplier = suppliers.get(p.supplierId);
+    return { ...p, title: purchaseTitle(p), supplier: supplier.name, phone: supplier.phone };
+  });
+}
+
+// Статистика за даты идёт через все отчётные периоды.
+async function purchasesBetween(from, to) {
+  const list = await db.purchases.where('dt').between(from, `${to}T99`, true, true).filter(p => p.status === 'active').toArray();
+  return withSuppliers(list);
 }
 
 const balanceLabel = r => (r.balance < 0 ? 'Перерасход' : 'Остаток');

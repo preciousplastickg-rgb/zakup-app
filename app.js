@@ -6,7 +6,7 @@ const PAY = { cash: 'Наличные', transfer: 'Перевод' };
 const ADV_METHOD = { cash: 'Наличные', transfer: 'Перевод на карту' };
 const TYPES = { goods: 'Товар', service: 'Услуга' };
 const UNITS = ['шт', 'м', 'п.м.', 'м²', 'м³', 'кг', 'т', 'л', 'уп.', 'лист', 'меш.', 'рулон', 'рейс', 'час', 'услуга'];
-const VIEWS = ['home', 'new', 'done', 'card', 'adv', 'items', 'report', 'close', 'more', 'dict', 'restore', 'log'];
+const VIEWS = ['home', 'new', 'done', 'card', 'search', 'adv', 'items', 'report', 'close', 'more', 'dict', 'restore', 'log'];
 const TABS = ['home', 'report', 'more'];
 const PHOTO_MAX_SIDE = 1600;
 const PHOTO_QUALITY = 0.7;
@@ -57,7 +57,7 @@ async function showHome() {
   show('home');
 }
 
-const NAV = { home: showHome, report: () => showReport(), more: showMore, card: () => openCard(cardId) };
+const NAV = { home: showHome, report: () => showReport(), more: showMore, card: () => openCard(cardId), search: () => openSearch() };
 
 document.addEventListener('click', e => {
   const go = e.target.closest('[data-go]');
@@ -133,7 +133,9 @@ $('b-newp').onclick = async () => {
 };
 $('h-list').addEventListener('click', e => {
   const b = e.target.closest('[data-card]');
-  if (b) openCard(Number(b.dataset.card));
+  if (!b) return;
+  cardBack = 'home';
+  openCard(Number(b.dataset.card));
 });
 
 /* Новая закупка */
@@ -625,6 +627,7 @@ $('s-log').onclick = openLog;
 /* Карточка закупки */
 
 let cardId = null;
+let cardBack = 'home';   // куда возвращается «Назад»: на главную или к результатам поиска
 let viewPhotoUrls = [];
 let stornoSaving = false;
 
@@ -657,6 +660,7 @@ async function openCard(id) {
     auditContext(),
   ]);
   releaseViewPhotos();
+  $('c-back').dataset.go = cardBack;
   const shots = photos.map(p => ({ kind: p.kind, url: viewPhotoUrl(p.blob) }));
   const receipts = shots.filter(p => p.kind === 'receipt');
   const goods = shots.filter(p => p.kind === 'goods');
@@ -895,6 +899,69 @@ async function submitItems() {
 
 $('i-save').onclick = submitItems;
 
+/* Поиск по всем закупкам, включая закрытые периоды */
+
+const search = { entries: [] };
+const SEARCH_LIMIT = 100;
+
+const foldText = text => text.toLowerCase().replace(/ё/g, 'е');
+const compactMoney = tyiyn => money(tyiyn).replace(/\s/g, '');
+
+function searchEntry(p, supplier) {
+  const amounts = [p.amount, ...p.items.flatMap(i => [i.sum, i.price])].map(compactMoney);
+  const words = [
+    p.goodsName, ...p.items.map(i => i.name), supplier.name, supplier.phone, p.place, p.comment,
+    DOC[p.docType], TYPES[p.type], pad3(p.no), dFull(p.dt), ...amounts,
+  ];
+  return { purchase: { ...p, supplierName: supplier.name }, amounts, date: dFull(p.dt), no: pad3(p.no), text: foldText(words.join(' ')) };
+}
+
+// Строка из цифр может быть суммой, датой или номером, поэтому проверяется целиком:
+// «12 500» с пробелом — одна сумма, а не два слова.
+function entryMatches(entry, query) {
+  const q = foldText(query.trim());
+  if (!q) return true;
+  if (/^[№\d\s.,]+$/.test(q)) {
+    const plain = q.replace(/[\s№]/g, '');
+    const asMoney = plain.replace('.', ',');
+    return entry.date.includes(plain) || entry.no === plain.padStart(3, '0') || entry.amounts.some(a => a.includes(asMoney));
+  }
+  return q.split(/\s+/).every(word => entry.text.includes(word));
+}
+
+function renderSearch() {
+  const query = $('q-input').value;
+  const found = search.entries.filter(e => entryMatches(e, query));
+  const shown = found.slice(0, query.trim() ? SEARCH_LIMIT : 20).map(e => e.purchase);
+  const total = sumAmounts(found.map(e => e.purchase).filter(p => p.status === 'active'));
+  $('q-hint').textContent = query.trim()
+    ? `Найдено: ${found.length}, на сумму ${money(total)} сом`
+    : 'Например: профлист, Асанов, 28.10 или 12500. Ниже последние закупки.';
+  $('q-list').innerHTML = shown.length
+    ? shown.map(x => renderOperation({ kind: 'purchase', x })).join('')
+    : (search.entries.length ? '<div class="empty">Ничего не найдено.</div>' : '<div class="empty">Закупок пока нет.</div>');
+}
+
+// Открывается сразу: иначе iPhone не покажет клавиатуру, она работает только прямо по нажатию.
+async function openSearch(fresh = false) {
+  if (fresh) $('q-input').value = '';
+  show('search');
+  if (fresh) $('q-input').focus();
+  const [purchases, suppliers] = await Promise.all([db.purchases.toCollection().reverse().toArray(), db.suppliers.toArray()]);
+  const byId = new Map(suppliers.map(s => [s.id, s]));
+  search.entries = purchases.map(p => searchEntry(p, byId.get(p.supplierId)));
+  renderSearch();
+}
+
+$('b-search').onclick = () => openSearch(true);
+$('q-input').addEventListener('input', renderSearch);
+$('q-list').addEventListener('click', e => {
+  const b = e.target.closest('[data-card]');
+  if (!b) return;
+  cardBack = 'search';
+  openCard(Number(b.dataset.card));
+});
+
 /* Отдача файлов */
 
 function downloadFile(file) {
@@ -995,8 +1062,13 @@ function renderMeter(r) {
     `<div class="stat-note">${note}</div></div>`;
 }
 
+function renderRangeTotal(stats) {
+  return `<div class="stat"><div class="stat-head"><h3>Потрачено</h3><span class="stat-big">${money(stats.spent)} сом</span></div>` +
+    `<div class="stat-note">${stats.count} ${plural(stats.count, 'закупка', 'закупки', 'закупок')}</div></div>`;
+}
+
 function renderDays(stats) {
-  const { buckets, weekly } = stats;
+  const { buckets, unit } = stats;
   if (buckets.length < 2) return '';
   const max = Math.max(...buckets.map(b => b.sum));
   if (!max) return '';
@@ -1005,7 +1077,7 @@ function renderDays(stats) {
     `<span class="col${i === peak ? ' on' : ''}"><i style="height:${b.sum ? Math.max(b.sum / max * 100, 3) : 0}%"></i></span>`
   ).join('');
   const label = buckets.map(b => `${b.label}: ${money(b.sum)} сом`).join(', ');
-  return `<div class="stat"><h3>Расходы по ${weekly ? 'неделям' : 'дням'}</h3>` +
+  return `<div class="stat"><h3>Расходы по ${unit}</h3>` +
     `<div class="stat-note" id="st-day">Больше всего: ${buckets[peak].label} — ${money(max)} сом</div>` +
     `<div class="plot" id="st-plot" role="img" aria-label="${esc(label)}">${columns}</div>` +
     `<div class="axis"><span>${buckets[0].label}</span><span>${buckets[buckets.length - 1].label}</span></div></div>`;
@@ -1026,13 +1098,14 @@ function bindDays(stats) {
   plot.addEventListener('pointermove', e => { if (e.buttons || e.pointerType === 'touch') select(e); });
 }
 
-function renderSplit(r, stats) {
-  if (!r.services || !stats.goodsSum) return '';
-  const share = v => Math.round(v * 100 / r.spent);
+function renderSplit(stats) {
+  if (!stats.services || !stats.goodsSum) return '';
+  // Малая, но ненулевая доля не должна выглядеть как ноль.
+  const share = v => Math.max(Math.round(v * 100 / stats.spent), 1);
   return '<div class="stat"><h3>Товары и услуги</h3>' +
-    `<div class="split" role="img" aria-label="Товары ${share(stats.goodsSum)}%, услуги ${share(r.services)}%"><i class="a" style="flex:${stats.goodsSum}"></i><i class="b" style="flex:${r.services}"></i></div>` +
+    `<div class="split" role="img" aria-label="Товары ${share(stats.goodsSum)}%, услуги ${share(stats.services)}%"><i class="a" style="flex:${stats.goodsSum}"></i><i class="b" style="flex:${stats.services}"></i></div>` +
     `<div class="legend"><div><i class="a"></i><span>Товары</span><span class="v">${money(stats.goodsSum)} · ${share(stats.goodsSum)}%</span></div>` +
-    `<div><i class="b"></i><span>Услуги</span><span class="v">${money(r.services)} · ${share(r.services)}%</span></div></div></div>`;
+    `<div><i class="b"></i><span>Услуги</span><span class="v">${money(stats.services)} · ${share(stats.services)}%</span></div></div></div>`;
 }
 
 function renderTopRows(rows) {
@@ -1045,13 +1118,12 @@ function renderTopRows(rows) {
   ).join('');
 }
 
-function renderStats(r) {
-  const stats = reportStats(r);
-  if (!r.active.length) {
-    $('r-stats').innerHTML = renderMeter(r) + '<div class="stat"><div class="stat-note">Закупок пока нет. Графики появятся после первой закупки.</div></div>';
+function renderStats(head, stats, emptyNote) {
+  if (!stats.count) {
+    $('r-stats').innerHTML = `${head}<div class="stat"><div class="stat-note">${emptyNote}</div></div>`;
     return;
   }
-  $('r-stats').innerHTML = renderMeter(r) + renderDays(stats) + renderSplit(r, stats) +
+  $('r-stats').innerHTML = head + renderDays(stats) + renderSplit(stats) +
     '<div class="stat"><h3>Куда ушли деньги</h3><div class="chips" id="st-top"></div><div class="rank" id="st-rank"></div></div>';
   bindDays(stats);
   const drawTop = () => { $('st-rank').innerHTML = renderTopRows(stats.top[topView]); };
@@ -1060,8 +1132,90 @@ function renderStats(r) {
   drawTop();
 }
 
+/* Диапазон статистики: отчётный период или любые даты, в том числе через несколько периодов */
+
+const STAT_MODES = { period: 'Период', day: 'День', week: 'Неделя', month: 'Месяц', custom: 'Даты' };
+const MONTHS = ['Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь', 'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь'];
+const statsRange = { mode: 'period', anchor: null, from: '', to: '' };
+let statsDraw = 0;
+
+const todayIso = () => nowLocal().slice(0, 10);
+
+function rangeDates() {
+  const { mode, anchor } = statsRange;
+  if (mode === 'custom') return statsRange.from <= statsRange.to ? [statsRange.from, statsRange.to] : [statsRange.to, statsRange.from];
+  if (mode === 'day') return [anchor, anchor];
+  const date = dateOf(anchor);
+  if (mode === 'week') {
+    const monday = isoPlusDays(anchor, -((date.getDay() + 6) % 7));
+    return [monday, isoPlusDays(monday, 6)];
+  }
+  return [isoDate(new Date(date.getFullYear(), date.getMonth(), 1)), isoDate(new Date(date.getFullYear(), date.getMonth() + 1, 0))];
+}
+
+function rangeLabel() {
+  const [from, to] = rangeDates();
+  if (statsRange.mode === 'day') return dFull(from);
+  if (statsRange.mode === 'week') return `${dShort(from)} — ${dFull(to)}`;
+  const date = dateOf(from);
+  return `${MONTHS[date.getMonth()]} ${date.getFullYear()}`;
+}
+
+function stepRange(direction) {
+  const { mode, anchor } = statsRange;
+  if (mode === 'day') statsRange.anchor = isoPlusDays(anchor, direction);
+  if (mode === 'week') statsRange.anchor = isoPlusDays(anchor, 7 * direction);
+  if (mode === 'month') {
+    const date = dateOf(anchor);
+    statsRange.anchor = isoDate(new Date(date.getFullYear(), date.getMonth() + direction, 1));
+  }
+  drawStats();
+}
+
+async function drawStats() {
+  const draw = ++statsDraw;
+  const { mode } = statsRange;
+  $('r-range-nav').hidden = mode === 'period' || mode === 'custom';
+  $('r-range-dates').hidden = mode !== 'custom';
+  if (mode === 'period') {
+    const r = report;
+    renderStats(renderMeter(r), reportStats(r.active, r.period.opened, r.end), 'Закупок пока нет. Графики появятся после первой закупки.');
+    return;
+  }
+  const [from, to] = rangeDates();
+  if (mode !== 'custom') {
+    $('r-range-label').textContent = rangeLabel();
+    $('r-next').disabled = to >= todayIso();
+  }
+  const active = await purchasesBetween(from, to);
+  // Быстрое листание: ответ на прошлый запрос не должен затереть новый.
+  if (draw !== statsDraw) return;
+  const stats = reportStats(active, from, to);
+  renderStats(stats.count ? renderRangeTotal(stats) : '', stats, 'За это время закупок нет.');
+}
+
+$('r-prev').onclick = () => stepRange(-1);
+$('r-next').onclick = () => stepRange(1);
+$('r-range').addEventListener('change', e => {
+  statsRange.mode = e.target.value;
+  statsRange.anchor = todayIso();
+  if (statsRange.mode === 'custom' && !statsRange.from) {
+    statsRange.from = isoPlusDays(todayIso(), -6);
+    statsRange.to = todayIso();
+    $('r-from').value = statsRange.from;
+    $('r-to').value = statsRange.to;
+  }
+  drawStats();
+});
+['from', 'to'].forEach(key => $('r-' + key).addEventListener('change', e => {
+  if (!e.target.value) return;
+  statsRange[key] = e.target.value;
+  drawStats();
+}));
+
 function applyReportView() {
   $('r-stats').hidden = reportView !== 'stats';
+  $('r-filter').hidden = reportView !== 'stats';
   $('r-summary').hidden = reportView !== 'sum';
 }
 
@@ -1107,7 +1261,8 @@ async function showReport(periodId) {
   $('r-notes').innerHTML = notes.join('');
 
   chips($('r-view'), 'rview', [['stats', 'Статистика'], ['sum', 'Итоги']], reportView);
-  renderStats(r);
+  chips($('r-range'), 'range', Object.entries(STAT_MODES), statsRange.mode);
+  await drawStats();
   applyReportView();
   $('r-sum').innerHTML = renderReportSum(r);
   $('r-table').innerHTML =
