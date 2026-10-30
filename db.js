@@ -94,6 +94,9 @@ const purchaseTitle = p => (p.items.length ? p.items.map(i => i.name).join(', ')
 
 const getLastPurchase = () => db.purchases.toCollection().reverse().filter(p => p.status === 'active').first();
 
+// Действующие закупки, новые первыми: из них строятся подсказки при вводе.
+const getRecentPurchases = () => db.purchases.toCollection().reverse().filter(p => p.status === 'active').toArray();
+
 // Отдельно от последней закупки: у услуги базара нет, и он не должен сбрасываться.
 async function getLastPlace() {
   const purchase = await db.purchases.toCollection().reverse().filter(p => p.status === 'active' && p.place).first();

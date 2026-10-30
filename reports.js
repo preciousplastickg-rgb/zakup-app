@@ -63,6 +63,61 @@ async function buildReport(period) {
 
 const reportTitle = p => (p.type === 'service' ? `Услуга: ${p.title}` : p.title);
 
+/* Статистика для экрана «Отчёт». В файлы для бухгалтерии не попадает. */
+
+const STAT_TOP = 5;
+const STAT_DAILY_LIMIT = 21;
+
+const dateOf = iso => {
+  const [y, m, d] = iso.slice(0, 10).split('-').map(Number);
+  return new Date(y, m - 1, d);
+};
+const daysBetween = (from, to) => Math.round((dateOf(to) - dateOf(from)) / 864e5);
+
+function isoPlusDays(iso, days) {
+  const d = dateOf(iso);
+  d.setDate(d.getDate() + days);
+  const z = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${z(d.getMonth() + 1)}-${z(d.getDate())}`;
+}
+
+// Длинный период показывается по неделям: на экране телефона больше 21 столбца не прочитать.
+function spendingBuckets(r) {
+  const days = daysBetween(r.period.opened, r.end) + 1;
+  const step = days <= STAT_DAILY_LIMIT ? 1 : 7;
+  const buckets = Array.from({ length: Math.ceil(days / step) }, (_, i) => {
+    const from = isoPlusDays(r.period.opened, i * step);
+    return { label: step === 1 ? dShort(from) : `${dShort(from)}–${dShort(isoPlusDays(from, step - 1))}`, sum: 0 };
+  });
+  r.active.forEach(p => {
+    const i = Math.floor(daysBetween(r.period.opened, p.dt) / step);
+    buckets[Math.min(Math.max(i, 0), buckets.length - 1)].sum += p.amount;
+  });
+  return { buckets, weekly: step > 1 };
+}
+
+// Первые пять по сумме, остальное одной строкой: ряды длиннее на телефоне не читаются.
+function rankTop(pairs) {
+  const totals = new Map();
+  pairs.forEach(([name, amount]) => totals.set(name, (totals.get(name) || 0) + amount));
+  const sorted = [...totals].map(([name, amount]) => ({ name, amount })).sort((a, b) => b.amount - a.amount);
+  const top = sorted.slice(0, STAT_TOP);
+  const rest = sumAmounts(sorted.slice(STAT_TOP));
+  return rest ? [...top, { name: 'Прочие', amount: rest, other: true }] : top;
+}
+
+function reportStats(r) {
+  return {
+    ...spendingBuckets(r),
+    goodsSum: r.spent - r.services,
+    top: {
+      suppliers: rankTop(r.active.map(p => [p.supplier, p.amount])),
+      bazaars: rankTop(r.active.filter(p => p.type !== 'service').map(p => [p.place || 'Не указан', p.amount])),
+      goods: rankTop(r.active.flatMap(p => (p.items.length ? p.items.map(i => [i.name, i.sum]) : [[p.title || 'Без названия', p.amount]]))),
+    },
+  };
+}
+
 const balanceLabel = r => (r.balance < 0 ? 'Перерасход' : 'Остаток');
 
 /* Excel */
@@ -102,23 +157,23 @@ async function reportXlsx(r) {
   ], [34, 40]);
 
   addSheet(wb, 'Реестр', [
-    ['№', 'Дата', 'Тип', 'Товар / услуга', 'Поставщик', 'Телефон', 'Базар', 'Документ', 'Оплата', 'Сумма', 'Комментарий'],
-    ...r.active.map(p => [pad3(p.no), date(p), p.type === 'service' ? 'Услуга' : 'Товар', p.title, p.supplier, p.phone, p.place, DOC[p.docType], PAY[p.payment], xlsMoney(p.amount), p.comment]),
-    ['Итого', '', '', '', '', '', '', '', '', xlsMoney(r.spent)],
-  ], [7, 11, 8, 34, 26, 16, 16, 15, 11, 14, 30]);
+    ['№', 'Дата', 'Тип', 'Товар / услуга', 'Документ', 'Оплата', 'Сумма', 'Комментарий'],
+    ...r.active.map(p => [pad3(p.no), date(p), p.type === 'service' ? 'Услуга' : 'Товар', p.title, DOC[p.docType], PAY[p.payment], xlsMoney(p.amount), p.comment]),
+    ['Итого', '', '', '', '', '', xlsMoney(r.spent)],
+  ], [7, 11, 8, 40, 15, 11, 14, 30]);
 
   addSheet(wb, 'Позиции', [
-    ['№ закупки', 'Дата', 'Поставщик', 'Наименование', 'Ед.', 'Кол-во', 'Цена', 'Сумма'],
+    ['№ закупки', 'Дата', 'Наименование', 'Ед.', 'Кол-во', 'Цена', 'Сумма'],
     ...r.active.flatMap(p => (p.items.length
-      ? p.items.map(i => [pad3(p.no), date(p), p.supplier, i.name, i.unit, i.qty, xlsMoney(i.price), xlsMoney(i.sum)])
-      : [[pad3(p.no), date(p), p.supplier, 'Позиции не внесены', '', '', '', xlsMoney(p.amount)]])),
-    ['Итого', '', '', '', '', '', '', xlsMoney(r.spent)],
-  ], [10, 11, 26, 36, 7, 9, 13, 14]);
+      ? p.items.map(i => [pad3(p.no), date(p), i.name, i.unit, i.qty, xlsMoney(i.price), xlsMoney(i.sum)])
+      : [[pad3(p.no), date(p), `${p.title}: позиции не внесены`, '', '', '', xlsMoney(p.amount)]])),
+    ['Итого', '', '', '', '', '', xlsMoney(r.spent)],
+  ], [10, 11, 42, 7, 9, 13, 14]);
 
   addSheet(wb, 'Сторно', [
-    ['№', 'Дата', 'Поставщик', 'Сумма', 'Причина'],
-    ...r.storno.map(p => [pad3(p.no), date(p), p.supplier, xlsMoney(p.amount), p.stornoReason]),
-  ], [7, 11, 26, 14, 40]);
+    ['№', 'Дата', 'Товар / услуга', 'Сумма', 'Причина'],
+    ...r.storno.map(p => [pad3(p.no), date(p), p.title, xlsMoney(p.amount), p.stornoReason]),
+  ], [7, 11, 34, 14, 40]);
 
   const data = XLSX.write(wb, { type: 'array', bookType: 'xlsx' });
   return new File([data], `Подотчёт_${r.fileBase}.xlsx`, { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
@@ -195,15 +250,15 @@ function pdfFooter(doc, label) {
 function pdfRegistryRows(r) {
   const right = { halign: 'right' };
   return r.active.flatMap(p => {
-    const head = [pad3(p.no), dFull(p.dt), reportTitle(p), p.supplier, DOC[p.docType], PAY[p.payment], money(p.amount)]
-      .map((content, i) => ({ content, styles: { fontStyle: 'bold', ...(i === 6 ? right : {}) } }));
+    const head = [pad3(p.no), dFull(p.dt), reportTitle(p), DOC[p.docType], PAY[p.payment], money(p.amount)]
+      .map((content, i) => ({ content, styles: { fontStyle: 'bold', ...(i === 5 ? right : {}) } }));
     const rows = p.items.map(i => [
       '',
-      { content: i.name, colSpan: 3 },
+      { content: i.name, colSpan: 2 },
       { content: `${String(i.qty).replace('.', ',')} ${i.unit} × ${money(i.price)}`, colSpan: 2, styles: right },
       { content: money(i.sum), styles: right },
     ]);
-    if (!p.items.length) rows.push(['', { content: 'Позиции не внесены', colSpan: 6, styles: { textColor: [90, 103, 116] } }]);
+    if (!p.items.length) rows.push(['', { content: 'Позиции не внесены', colSpan: 5, styles: { textColor: [90, 103, 116] } }]);
     return [head, ...rows];
   });
 }
@@ -237,19 +292,19 @@ async function reportPdf(r) {
   y = pdfHeading(doc, y, 'Реестр закупок');
   y = pdfTable(doc, {
     startY: y,
-    head: [['№', 'Дата', 'Товар / услуга', 'Поставщик', 'Документ', 'Оплата', { content: 'Сумма', styles: right }]],
+    head: [['№', 'Дата', 'Товар / услуга', 'Документ', 'Оплата', { content: 'Сумма', styles: right }]],
     body: pdfRegistryRows(r),
-    foot: [[{ content: 'Итого без сторно', colSpan: 6 }, { content: money(r.spent), styles: right }]],
+    foot: [[{ content: 'Итого без сторно', colSpan: 5 }, { content: money(r.spent), styles: right }]],
     showFoot: 'lastPage',
-    columnStyles: { 0: { cellWidth: 10 }, 1: { cellWidth: 20 }, 4: { cellWidth: 26 }, 5: { cellWidth: 19 }, 6: { cellWidth: 24 } },
+    columnStyles: { 0: { cellWidth: 10 }, 1: { cellWidth: 20 }, 3: { cellWidth: 26 }, 4: { cellWidth: 19 }, 5: { cellWidth: 24 } },
   });
 
   if (r.noDocList.length) {
     y = pdfHeading(doc, y, 'Без документов');
     y = pdfTable(doc, {
       startY: y,
-      head: [['№', 'Дата', 'Поставщик', { content: 'Сумма', styles: right }]],
-      body: r.noDocList.map(p => [pad3(p.no), dFull(p.dt), p.supplier, { content: money(p.amount), styles: right }]),
+      head: [['№', 'Дата', 'Товар / услуга', { content: 'Сумма', styles: right }]],
+      body: r.noDocList.map(p => [pad3(p.no), dFull(p.dt), reportTitle(p), { content: money(p.amount), styles: right }]),
       foot: [[{ content: 'Итого без документов', colSpan: 3 }, { content: money(r.noDoc), styles: right }]],
       showFoot: 'lastPage',
       columnStyles: { 0: { cellWidth: 10 }, 1: { cellWidth: 20 } },
@@ -260,8 +315,8 @@ async function reportPdf(r) {
     y = pdfHeading(doc, y, 'Сторно (в сумму не входит)');
     y = pdfTable(doc, {
       startY: y,
-      head: [['№', 'Дата', 'Поставщик', 'Причина', { content: 'Сумма', styles: right }]],
-      body: r.storno.map(p => [pad3(p.no), dFull(p.dt), p.supplier, p.stornoReason || '', { content: money(p.amount), styles: right }]),
+      head: [['№', 'Дата', 'Товар / услуга', 'Причина', { content: 'Сумма', styles: right }]],
+      body: r.storno.map(p => [pad3(p.no), dFull(p.dt), reportTitle(p), p.stornoReason || '', { content: money(p.amount), styles: right }]),
       columnStyles: { 0: { cellWidth: 10 }, 1: { cellWidth: 20 }, 4: { cellWidth: 24 } },
     });
   }
@@ -314,7 +369,7 @@ async function photosPdf(r) {
     doc.text(`Закупка №${pad3(p.no)}`, PDF_MARGIN, 20);
     doc.setFont('Plex', 'normal');
     doc.setFontSize(10);
-    doc.text(`${dFull(p.dt)} · ${p.supplier} · ${money(p.amount)} сом · ${DOC[p.docType]}`, PDF_MARGIN, 26);
+    doc.text(`${dFull(p.dt)} · ${reportTitle(p)} · ${money(p.amount)} сом · ${DOC[p.docType]}`, PDF_MARGIN, 26);
     const bytes = new Uint8Array(await blob.arrayBuffer());
     const { width, height } = doc.getImageProperties(bytes);
     const scale = Math.min(PDF_WIDTH / width, boxHeight / height);

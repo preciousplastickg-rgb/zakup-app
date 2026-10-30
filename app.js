@@ -11,6 +11,7 @@ const TABS = ['home', 'report', 'more'];
 const PHOTO_MAX_SIDE = 1600;
 const PHOTO_QUALITY = 0.7;
 const DOUBLE_TAP_MS = 600;
+const SUGGEST_LIMIT = 6;
 
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -75,10 +76,13 @@ function renderOperation({ kind, x }) {
     const tag = x.method === 'cash' ? 'нал' : 'перевод';
     return `<div class="item static"><span class="no">${dShort(x.date)}</span><span class="body"><span class="t">Выдача аванса<span class="tag adv">${tag}</span></span><span class="s">${esc(x.by)}</span></span><span class="a good">+${money(x.amount)}</span></div>`;
   }
-  const doc = x.docType === 'none' ? '<span class="tag warn">нет документа</span>' : DOC[x.docType];
   const storno = x.status === 'storno';
-  const service = x.type === 'service' ? '<span class="tag adv">услуга</span> ' : '';
-  return `<button class="item${storno ? ' storno' : ''}" type="button" data-card="${x.id}"><span class="no">№${pad3(x.no)}<br>${dShort(x.dt)}</span><span class="body"><span class="t">${esc(purchaseTitle(x) || x.supplierName)}</span><span class="s">${service}${esc(x.supplierName)} · ${storno ? '<span class="tag bad">сторно</span>' : doc}</span></span><span class="a">−${money(x.amount)}</span></button>`;
+  const noDoc = x.docType === 'none';
+  // Метки идут первыми: длинное имя поставщика не должно вытеснять их за многоточие.
+  const tags = (x.type === 'service' ? '<span class="tag adv">услуга</span>' : '') +
+    (storno ? '<span class="tag bad">сторно</span>' : noDoc ? '<span class="tag warn">нет документа</span>' : '');
+  const doc = storno || noDoc ? '' : ` · ${DOC[x.docType]}`;
+  return `<button class="item${storno ? ' storno' : ''}" type="button" data-card="${x.id}"><span class="no">№${pad3(x.no)}<br>${dShort(x.dt)}</span><span class="body"><span class="t">${esc(purchaseTitle(x) || x.supplierName)}</span><span class="s">${tags}${tags ? ' ' : ''}${esc(x.supplierName)}${doc}</span></span><span class="a">−${money(x.amount)}</span></button>`;
 }
 
 async function renderHome() {
@@ -138,6 +142,9 @@ const form = {
   balance: 0,
   suppliers: [],
   bazaars: [],
+  history: [],        // действующие закупки, новые первыми: источник подсказок
+  lastSaved: null,    // для кнопки «Ещё у этого поставщика»
+  touched: {},        // поля, выбранные вручную: подстановка их не трогает
   editing: null,      // закупка в режиме правки, null для новой
   session: {},        // новая форма — новый объект: по нему отсекается фото, дожатое для прошлой формы
   receipt: null,
@@ -188,15 +195,18 @@ function applyPurchaseType() {
   $('f-phone-label').textContent = service ? 'Телефон исполнителя' : 'Телефон поставщика';
   $('f-place-field').hidden = service;
   renderGoods();
+  updateSuggestions();
 }
 
 $('f-type').addEventListener('change', applyPurchaseType);
 
-function fillForm({ editing, no, balance, bazaars, suppliers, place, type, docType, payment }) {
+function fillForm({ editing, no, balance, bazaars, suppliers, history, place, type, docType, payment }) {
   form.editing = editing;
   form.balance = balance;
   form.suppliers = suppliers.filter(s => !s.archived);
   form.bazaars = bazaars.filter(b => b.active);
+  form.history = history;
+  form.touched = {};
   form.session = {};
   form.receiptPick = null;
   form.photoJobs = [];
@@ -215,7 +225,6 @@ function fillForm({ editing, no, balance, bazaars, suppliers, place, type, docTy
   ['f-name', 'f-amount', 'f-supplier', 'f-phone', 'f-comment'].forEach(id => { $(id).value = ''; });
   $('f-place-new').hidden = true;
   $('f-place-add').hidden = false;
-  $('dl-sup').innerHTML = form.suppliers.map(s => `<option value="${esc(s.name)}"></option>`).join('');
   renderPlaces(place);
   chips($('f-type'), 'type', Object.entries(TYPES), type);
   applyPurchaseType();
@@ -223,14 +232,16 @@ function fillForm({ editing, no, balance, bazaars, suppliers, place, type, docTy
   chips($('f-pay'), 'pay', Object.entries(PAY), payment);
 }
 
-async function openNew() {
-  const [no, sum, last, place, bazaars, suppliers] = await Promise.all([
+// prefill — кнопки «Ещё у этого поставщика» и «Повторить закупку»: остаётся ввести только сумму.
+async function openNew(prefill = null) {
+  const [no, sum, last, place, bazaars, suppliers, history] = await Promise.all([
     peekPurchaseNo(),
     getOpenPeriod().then(periodSummary),
     getLastPurchase(),
     getLastPlace(),
     db.bazaars.toArray(),
     db.suppliers.toArray(),
+    getRecentPurchases(),
   ]);
   fillForm({
     editing: null,
@@ -238,22 +249,28 @@ async function openNew() {
     balance: sum.balance,
     bazaars,
     suppliers,
+    history,
     place,
-    type: 'goods',
+    type: prefill ? prefill.type : 'goods',
     docType: last ? last.docType : 'ekkm',
     payment: last ? last.payment : 'cash',
   });
+  if (prefill) {
+    $('f-name').value = prefill.goodsName || '';
+    pickSupplier(prefill.supplierName);
+  }
   updateOverspendNote();
   show('new');
 }
 
 async function openEdit(id) {
   const x = await db.purchases.get(id);
-  const [sum, bazaars, suppliers, supplier] = await Promise.all([
+  const [sum, bazaars, suppliers, supplier, history] = await Promise.all([
     db.periods.get(x.periodId).then(periodSummary),
     db.bazaars.toArray(),
     db.suppliers.toArray(),
     db.suppliers.get(x.supplierId),
+    getRecentPurchases(),
   ]);
   fillForm({
     editing: x,
@@ -261,6 +278,7 @@ async function openEdit(id) {
     balance: sum.balance + x.amount,
     bazaars,
     suppliers,
+    history,
     place: x.place,
     type: x.type,
     docType: x.docType,
@@ -271,6 +289,7 @@ async function openEdit(id) {
   $('f-supplier').value = supplier.name;
   $('f-phone').value = supplier.phone;
   $('f-comment').value = x.comment;
+  updateSuggestions();
   updateOverspendNote();
   show('new');
 }
@@ -342,13 +361,93 @@ function updateOverspendNote() {
 }
 $('f-amount').addEventListener('input', updateOverspendNote);
 
-// Телефон и базар известного поставщика подставляются сами: быстрый режим экономит нажатия.
-$('f-supplier').addEventListener('input', e => {
-  const name = e.target.value.trim().toLowerCase();
-  const known = form.suppliers.find(s => s.name.toLowerCase() === name);
+/* Подсказки: повторы вводятся одним касанием и без клавиатуры. */
+
+function renderSuggest(box, options, value, keepExact = false) {
+  const query = value.trim().toLowerCase();
+  const exact = !keepExact && options.some(o => o.toLowerCase() === query);
+  const list = exact ? [] : options.filter(o => o.toLowerCase().includes(query)).slice(0, SUGGEST_LIMIT);
+  box.innerHTML = list.map(o => `<button type="button" data-value="${esc(o)}">${esc(o)}</button>`).join('');
+}
+
+const typeOf = p => p.type || 'goods';
+
+function nameOptions() {
+  const type = radioVal('type');
+  const names = form.history.filter(p => typeOf(p) === type).flatMap(p => [p.goodsName, ...p.items.map(i => i.name)]);
+  return [...new Set(names.filter(Boolean))];
+}
+
+// Сначала те, у кого такое уже покупали, затем остальные поставщики.
+function supplierOptions() {
+  const type = radioVal('type');
+  const byId = new Map(form.suppliers.map(s => [s.id, s.name]));
+  const recent = form.history.filter(p => typeOf(p) === type).map(p => byId.get(p.supplierId)).filter(Boolean);
+  return [...new Set([...recent, ...form.suppliers.map(s => s.name)])];
+}
+
+function updateSuggestions() {
+  renderSuggest($('f-name-suggest'), nameOptions(), $('f-name').value);
+  renderSuggest($('f-supplier-suggest'), supplierOptions(), $('f-supplier').value);
+}
+
+function setRadio(name, value) {
+  const radio = [...document.querySelectorAll(`input[name="${name}"]`)].find(r => r.value === value);
+  if (radio) radio.checked = true;
+}
+
+// Поставщик тянет за собой всё, что у него было в прошлый раз: телефон, базар, документ, оплату.
+function applySupplierDefaults(name) {
+  const query = name.trim().toLowerCase();
+  const known = form.suppliers.find(s => s.name.toLowerCase() === query);
   if (!known) return;
   if (known.phone && !$('f-phone').value) $('f-phone').value = known.phone;
-  if (known.place) renderPlaces(known.place);
+  const last = form.history.find(p => p.supplierId === known.id && typeOf(p) === radioVal('type'));
+  const place = (last && last.place) || known.place;
+  if (place && !form.touched.place) renderPlaces(place);
+  if (!last || form.editing) return;
+  if (!form.touched.doc) setRadio('doc', last.docType);
+  if (!form.touched.pay) setRadio('pay', last.payment);
+  resetNoDocConfirm();
+}
+
+function pickSupplier(name) {
+  $('f-supplier').value = name;
+  applySupplierDefaults(name);
+  updateSuggestions();
+}
+
+// Известный товар сразу подставляет поставщика, у которого его брали в прошлый раз.
+function pickName(name) {
+  $('f-name').value = name;
+  const last = form.history.find(p => p.goodsName === name || p.items.some(i => i.name === name));
+  const supplier = last && form.suppliers.find(s => s.id === last.supplierId);
+  if (supplier && !$('f-supplier').value) pickSupplier(supplier.name);
+  updateSuggestions();
+}
+
+['doc', 'pay', 'place'].forEach(name => $('f-' + name).addEventListener('change', () => { form.touched[name] = true; }));
+$('f-name').addEventListener('input', updateSuggestions);
+$('f-supplier').addEventListener('input', e => {
+  applySupplierDefaults(e.target.value);
+  updateSuggestions();
+});
+$('f-name-suggest').addEventListener('click', e => {
+  const b = e.target.closest('[data-value]');
+  if (b) pickName(b.dataset.value);
+});
+$('f-supplier-suggest').addEventListener('click', e => {
+  const b = e.target.closest('[data-value]');
+  if (b) pickSupplier(b.dataset.value);
+});
+
+// Кнопка «Далее» на клавиатуре ведёт к следующему обязательному полю.
+const NEXT_FIELD = { 'f-name': 'f-supplier', 'f-supplier': 'f-amount', 'f-phone': 'f-amount' };
+$('v-new').addEventListener('keydown', e => {
+  const next = NEXT_FIELD[e.target.id];
+  if (e.key !== 'Enter' || !next) return;
+  e.preventDefault();
+  $(next).focus();
 });
 
 $('f-place-add').onclick = () => {
@@ -450,6 +549,7 @@ async function submitPurchase() {
     toast('Изменения сохранены');
     return;
   }
+  form.lastSaved = { type, supplierName };
   const { balance } = await periodSummary(await db.periods.get(saved.periodId));
   $('d-no').textContent = pad3(saved.no);
   $('d-sum').innerHTML = `<span class="num">${money(amount)}</span> сом · ${esc(supplierName)}<br>Остаток: <span class="num">${money(balance)}</span> сом${balance < 0 ? ' (перерасход)' : ''}`;
@@ -458,6 +558,7 @@ async function submitPurchase() {
 
 $('f-save').onclick = submitPurchase;
 $('d-more').onclick = () => openNew();
+$('d-same').onclick = () => openNew(form.lastSaved);
 
 /* Журнал */
 
@@ -580,7 +681,7 @@ async function openCard(id) {
     row('Период', esc(period.number)) +
     (x.comment ? row('Комментарий', esc(x.comment)) : '') +
     '</dl>' +
-    (editable ? '<div class="btn-row"><button class="btn primary" type="button" id="c-items">Позиции</button><button class="btn" type="button" id="c-edit">Изменить</button></div>' : '') +
+    (editable ? '<div class="btn-row"><button class="btn primary" type="button" id="c-items">Позиции</button><button class="btn" type="button" id="c-edit">Изменить</button></div><button class="btn full" type="button" id="c-repeat">Повторить закупку</button>' : '') +
     '<div class="section-h"><h3>Позиции</h3></div>' +
     (x.items.length ? renderItemsTable(x) : '<div class="ph-none"><span>Позиции не внесены.</span></div>') +
     '<div class="section-h"><h3>Фото документа</h3></div>' +
@@ -597,6 +698,7 @@ async function openCard(id) {
   if (editable) {
     $('c-items').onclick = () => openItems(id);
     $('c-edit').onclick = () => openEdit(id);
+    $('c-repeat').onclick = () => openNew({ type: x.type, goodsName: x.goodsName, supplierName: supplier.name });
     $('c-st-open').onclick = () => openStorno(x);
   }
   show('card');
@@ -629,17 +731,35 @@ function openStorno(x) {
 
 /* Позиции. Вносятся после рынка, по чеку, в уже сохранённую закупку. */
 
-const itemsForm = { purchase: null, balance: 0, armedAt: 0, saving: false };
+const itemsForm = { purchase: null, balance: 0, known: new Map(), armedAt: 0, saving: false };
+
+// Каждое наименование один раз, с последней ценой и единицей: вечером это главная экономия времени.
+function knownItems(history) {
+  const known = new Map();
+  history.forEach(p => p.items.forEach(i => {
+    const key = i.name.toLowerCase();
+    if (!known.has(key)) known.set(key, i);
+  }));
+  return known;
+}
+
+function updateItemSuggest(row) {
+  const box = row.querySelector('[data-suggest]');
+  const priced = row.querySelector('.i-price').value.trim();
+  renderSuggest(box, priced ? [] : [...itemsForm.known.values()].map(i => i.name), row.querySelector('.i-name').value, true);
+}
 
 async function openItems(id) {
   const purchase = await db.purchases.get(id);
-  const [sum, receipt] = await Promise.all([
+  const [sum, receipt, history] = await Promise.all([
     db.periods.get(purchase.periodId).then(periodSummary),
     db.photos.where('purchaseId').equals(id).filter(p => p.kind === 'receipt').first(),
+    getRecentPurchases(),
   ]);
   releaseViewPhotos();
   itemsForm.purchase = purchase;
   itemsForm.balance = sum.balance;
+  itemsForm.known = knownItems(history);
   $('i-no').textContent = '№' + pad3(purchase.no);
   $('i-receipt').hidden = !receipt;
   $('i-receipt-img').src = receipt ? viewPhotoUrl(receipt.blob) : '';
@@ -655,7 +775,8 @@ function addItemRow(item) {
   const row = document.createElement('div');
   row.className = 'irow';
   row.innerHTML =
-    '<input class="input i-name" placeholder="Наименование, например Арматура d12" aria-label="Наименование" autocomplete="off">' +
+    '<input class="input i-name" placeholder="Наименование, например Арматура d12" aria-label="Наименование" autocomplete="off" autocorrect="off" spellcheck="false">' +
+    '<div class="suggest" data-suggest></div>' +
     `<div class="igrid"><select class="input i-unit" aria-label="Единица">${UNITS.map(u => `<option>${u}</option>`).join('')}</select>` +
     '<input class="input i-qty" inputmode="decimal" placeholder="Кол-во" aria-label="Количество" autocomplete="off">' +
     '<input class="input i-price" inputmode="decimal" placeholder="Цена" aria-label="Цена" autocomplete="off"></div>' +
@@ -667,6 +788,7 @@ function addItemRow(item) {
     row.querySelector('.i-price').value = money(item.price);
   }
   $('i-rows').appendChild(row);
+  updateItemSuggest(row);
 }
 
 function readRow(row) {
@@ -714,8 +836,23 @@ function itemsChanged() {
   updateItemsTotals();
 }
 
-$('i-rows').addEventListener('input', itemsChanged);
+$('i-rows').addEventListener('input', e => {
+  updateItemSuggest(e.target.closest('.irow'));
+  itemsChanged();
+});
 $('i-rows').addEventListener('click', e => {
+  const pick = e.target.closest('[data-value]');
+  if (pick) {
+    const row = pick.closest('.irow');
+    const item = itemsForm.known.get(pick.dataset.value.toLowerCase());
+    row.querySelector('.i-name').value = item.name;
+    row.querySelector('.i-unit').value = item.unit;
+    row.querySelector('.i-price').value = money(item.price);
+    updateItemSuggest(row);
+    itemsChanged();
+    row.querySelector('.i-qty').focus();
+    return;
+  }
   if (!e.target.closest('[data-del]')) return;
   e.target.closest('.irow').remove();
   if (!$('i-rows').children.length) addItemRow(null);
@@ -834,6 +971,104 @@ async function runBackup(button, onDone) {
 /* Отчёт */
 
 let report = null;
+let reportView = 'stats';
+
+// Длинный перечень номеров отодвигал бы графики за экран.
+function withoutItemsLabel(list) {
+  if (list.length <= 5) return list.map(p => '№' + pad3(p.no)).join(', ');
+  return `${list.length} ${plural(list.length, 'закупка', 'закупки', 'закупок')}`;
+}
+
+let topView = 'suppliers';
+
+const TOP_VIEWS = { suppliers: 'Поставщики', bazaars: 'Базары', goods: 'Товары' };
+
+function renderMeter(r) {
+  if (!r.issued) return '<div class="stat"><h3>Использование аванса</h3><div class="stat-note">Аванс в этом периоде не выдавался.</div></div>';
+  const pct = Math.round(r.spent * 100 / r.issued);
+  const level = pct > 100 ? 'bad' : pct >= 90 ? 'warn' : '';
+  const note = pct > 100
+    ? `Перерасход ${money(r.spent - r.issued)} сом`
+    : `Потрачено ${money(r.spent)} из ${money(r.issued)} сом`;
+  return `<div class="stat"><div class="stat-head"><h3>Использование аванса</h3><span class="stat-big">${pct}%</span></div>` +
+    `<div class="meter" role="img" aria-label="Использовано ${pct}% аванса"><i class="${level}" style="width:${Math.min(pct, 100)}%"></i></div>` +
+    `<div class="stat-note">${note}</div></div>`;
+}
+
+function renderDays(stats) {
+  const { buckets, weekly } = stats;
+  if (buckets.length < 2) return '';
+  const max = Math.max(...buckets.map(b => b.sum));
+  if (!max) return '';
+  const peak = buckets.findIndex(b => b.sum === max);
+  const columns = buckets.map((b, i) =>
+    `<span class="col${i === peak ? ' on' : ''}"><i style="height:${b.sum ? Math.max(b.sum / max * 100, 3) : 0}%"></i></span>`
+  ).join('');
+  const label = buckets.map(b => `${b.label}: ${money(b.sum)} сом`).join(', ');
+  return `<div class="stat"><h3>Расходы по ${weekly ? 'неделям' : 'дням'}</h3>` +
+    `<div class="stat-note" id="st-day">Больше всего: ${buckets[peak].label} — ${money(max)} сом</div>` +
+    `<div class="plot" id="st-plot" role="img" aria-label="${esc(label)}">${columns}</div>` +
+    `<div class="axis"><span>${buckets[0].label}</span><span>${buckets[buckets.length - 1].label}</span></div></div>`;
+}
+
+// Касание и ведение пальцем по графику: столбцы слишком узкие, чтобы попадать в каждый.
+function bindDays(stats) {
+  const plot = $('st-plot');
+  if (!plot) return;
+  const select = e => {
+    const box = plot.getBoundingClientRect();
+    const i = Math.min(Math.max(Math.floor((e.clientX - box.left) / box.width * stats.buckets.length), 0), stats.buckets.length - 1);
+    [...plot.children].forEach((c, k) => c.classList.toggle('on', k === i));
+    $('st-day').textContent = `${stats.buckets[i].label} — ${money(stats.buckets[i].sum)} сом`;
+  };
+  plot.addEventListener('click', select);
+  plot.addEventListener('pointerdown', select);
+  plot.addEventListener('pointermove', e => { if (e.buttons || e.pointerType === 'touch') select(e); });
+}
+
+function renderSplit(r, stats) {
+  if (!r.services || !stats.goodsSum) return '';
+  const share = v => Math.round(v * 100 / r.spent);
+  return '<div class="stat"><h3>Товары и услуги</h3>' +
+    `<div class="split" role="img" aria-label="Товары ${share(stats.goodsSum)}%, услуги ${share(r.services)}%"><i class="a" style="flex:${stats.goodsSum}"></i><i class="b" style="flex:${r.services}"></i></div>` +
+    `<div class="legend"><div><i class="a"></i><span>Товары</span><span class="v">${money(stats.goodsSum)} · ${share(stats.goodsSum)}%</span></div>` +
+    `<div><i class="b"></i><span>Услуги</span><span class="v">${money(r.services)} · ${share(r.services)}%</span></div></div></div>`;
+}
+
+function renderTopRows(rows) {
+  if (!rows.length) return '<div class="stat-note">Пока нет данных.</div>';
+  const max = rows.reduce((m, x) => Math.max(m, x.amount), 0);
+  return rows.map(x =>
+    `<div><div class="rank-h"><span>${esc(x.name)}</span><span class="v">${money(x.amount)}</span></div>` +
+    (rows.length > 1 ? `<div class="rank-bar"><i class="${x.other ? 'other' : ''}" style="width:${x.amount / max * 100}%"></i></div>` : '') +
+    '</div>'
+  ).join('');
+}
+
+function renderStats(r) {
+  const stats = reportStats(r);
+  if (!r.active.length) {
+    $('r-stats').innerHTML = renderMeter(r) + '<div class="stat"><div class="stat-note">Закупок пока нет. Графики появятся после первой закупки.</div></div>';
+    return;
+  }
+  $('r-stats').innerHTML = renderMeter(r) + renderDays(stats) + renderSplit(r, stats) +
+    '<div class="stat"><h3>Куда ушли деньги</h3><div class="chips" id="st-top"></div><div class="rank" id="st-rank"></div></div>';
+  bindDays(stats);
+  const drawTop = () => { $('st-rank').innerHTML = renderTopRows(stats.top[topView]); };
+  chips($('st-top'), 'top', Object.entries(TOP_VIEWS), topView);
+  $('st-top').onchange = e => { topView = e.target.value; drawTop(); };
+  drawTop();
+}
+
+function applyReportView() {
+  $('r-stats').hidden = reportView !== 'stats';
+  $('r-summary').hidden = reportView !== 'sum';
+}
+
+$('r-view').addEventListener('change', e => {
+  reportView = e.target.value;
+  applyReportView();
+});
 
 function renderReportSum(r) {
   const row = (label, value, cls = '') => `<div><span>${label}</span><span class="v ${cls}">${value}</span></div>`;
@@ -868,9 +1103,12 @@ async function showReport(periodId) {
 
   const notes = [];
   if (!r.userName) notes.push('<div class="note warn"><span>ФИО не указано. Заполните его в Настройках, оно попадёт в шапку отчёта.</span></div>');
-  if (r.withoutItems.length) notes.push(`<div class="note warn"><span>Без позиций: ${r.withoutItems.map(p => '№' + pad3(p.no)).join(', ')}. В отчёте у них будет только сумма.</span></div>`);
+  if (r.withoutItems.length) notes.push(`<div class="note warn"><span>Без позиций: ${withoutItemsLabel(r.withoutItems)}. В отчёте у них будет только сумма.</span></div>`);
   $('r-notes').innerHTML = notes.join('');
 
+  chips($('r-view'), 'rview', [['stats', 'Статистика'], ['sum', 'Итоги']], reportView);
+  renderStats(r);
+  applyReportView();
   $('r-sum').innerHTML = renderReportSum(r);
   $('r-table').innerHTML =
     '<thead><tr><th>№</th><th>Дата</th><th>Товар / услуга</th><th>Поставщик</th><th>Документ</th><th>Оплата</th><th class="r">Сумма</th></tr></thead><tbody>' +
@@ -934,7 +1172,7 @@ function openClose() {
     `<div><span>Израсходовано</span><span class="v">${money(r.spent)}</span></div>` +
     `<div class="total"><span>${available < 0 ? 'Перерасход' : 'Остаток на руках'}</span><span class="v ${available < 0 ? 'bad' : ''}">${money(Math.abs(available))} сом</span></div>`;
   const notes = [];
-  if (r.withoutItems.length) notes.push(`<div class="note warn"><span>Без позиций: ${r.withoutItems.map(p => '№' + pad3(p.no)).join(', ')}. После закрытия внести их можно только через переоткрытие.</span></div>`);
+  if (r.withoutItems.length) notes.push(`<div class="note warn"><span>Без позиций: ${withoutItemsLabel(r.withoutItems)}. После закрытия внести их можно только через переоткрытие.</span></div>`);
   if (available < 0) notes.push(`<div class="note bad"><span>Перерасход <b class="num">${money(-available)} сом</b> будет зафиксирован в отчёте.</span></div>`);
   $('cl-notes').innerHTML = notes.join('');
   $('cl-ret').value = money(Math.max(available, 0));
