@@ -1,0 +1,295 @@
+'use strict';
+// Данные приложения: схема Dexie, запись операций, деньги и даты. Интерфейса здесь нет.
+
+const db = new Dexie('zakup');
+
+// Нумерация обнуляется в январе, поэтому номер уникален только в пределах года: &[year+no].
+db.version(1).stores({
+  periods: '++id, number, status',
+  advances: '++id, periodId, date',
+  purchases: '++id, &[year+no], periodId, dt, supplierId, purposeId, status',
+  photos: '++id, purchaseId',
+  suppliers: '++id, &name',
+  purposes: '++id, &name',
+  counters: '&key',
+  auditLog: '++id, entity, entityId, at',
+  settings: '&key',
+});
+
+db.on('populate', tx => {
+  tx.table('purposes').bulkAdd(['Цех №2', 'Ремонт офиса', 'Производство'].map(name => ({ name, active: true })));
+  tx.table('settings').add({ key: 'org', value: 'Азия Сталь' });
+});
+
+/* Деньги: целые тыйыны. Float не участвует ни при разборе, ни при выводе. */
+
+// '1 250,50' → 125050. null, если строка не является суммой.
+function parseMoney(text) {
+  const m = /^(\d{1,10})(?:[.,](\d{0,2}))?$/.exec(String(text).replace(/\s/g, ''));
+  if (!m) return null;
+  return Number(m[1]) * 100 + Number((m[2] || '').padEnd(2, '0'));
+}
+
+// 125050 → '1 250,50' (неразрывный пробел), 125000 → '1 250'.
+function money(tyiyn) {
+  const abs = Math.abs(tyiyn);
+  const frac = abs % 100;
+  const whole = String((abs - frac) / 100).replace(/\B(?=(\d{3})+$)/g, ' ');
+  return (tyiyn < 0 ? '−' : '') + whole + (frac ? ',' + String(frac).padStart(2, '0') : '');
+}
+
+// Количество: до 3 знаков после запятой. null, если строка не является числом.
+function parseQty(text) {
+  const m = /^(\d{1,6})(?:[.,](\d{0,3}))?$/.exec(String(text).replace(/\s/g, ''));
+  return m ? Number(`${m[1]}.${m[2] || '0'}`) : null;
+}
+
+// Считается через целые тысячные: в float 1.005 * 100 = 100.49999…, и тыйын терялся бы.
+const itemSum = (qty, price) => Math.round(Math.round(qty * 1000) * price / 1000);
+
+/* Даты: только локальное время устройства. toISOString() дал бы UTC и сдвинул день и год. */
+
+function nowLocal() {
+  const d = new Date();
+  const z = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${z(d.getMonth() + 1)}-${z(d.getDate())}T${z(d.getHours())}:${z(d.getMinutes())}`;
+}
+
+const purchaseCounterKey = year => `purchase-${year}`;
+
+class NameTakenError extends Error {}
+class LastPurposeError extends Error {}
+class PeriodOpenError extends Error {}
+class BackupError extends Error {}
+
+const BACKUP_MAX_DAYS = 7;
+const BACKUP_MAX_PURCHASES = 20;
+
+/* Чтение */
+
+const getOpenPeriod = () => db.periods.where('status').equals('open').first();
+
+// Открытый период, а если его нет — последний закрытый: главная показывает его итог.
+const getCurrentPeriod = async () => (await getOpenPeriod()) || db.periods.toCollection().last();
+
+// Сторно обычно означает ошибку, поэтому значения по умолчанию из него не берутся.
+const getLastPurchase = () => db.purchases.toCollection().reverse().filter(p => p.status === 'active').first();
+
+async function getSetting(key) {
+  const row = await db.settings.get(key);
+  return row ? row.value : undefined;
+}
+
+// Напоминание о бэкапе: больше 7 дней или больше 20 закупок с прошлого раза. null, если пока рано.
+async function backupReminder() {
+  const first = await db.purchases.orderBy('dt').first();
+  if (!first) return null;
+  const lastAt = await getSetting('lastBackupAt');
+  const days = Math.floor((Date.now() - new Date(lastAt || first.dt).getTime()) / 864e5);
+  const count = await (lastAt ? db.purchases.where('dt').above(lastAt).count() : db.purchases.count());
+  return days > BACKUP_MAX_DAYS || count > BACKUP_MAX_PURCHASES ? { days, count, never: !lastAt } : null;
+}
+
+// Номер, который получит следующая закупка. Только для показа: выдаётся он в savePurchase.
+async function peekPurchaseNo() {
+  const row = await db.counters.get(purchaseCounterKey(Number(nowLocal().slice(0, 4))));
+  return (row ? row.value : 0) + 1;
+}
+
+const sumAmounts = list => list.reduce((sum, x) => sum + x.amount, 0);
+
+// Остаток нигде не хранится и считается здесь: Σ выдач − Σ активных закупок − возврат.
+async function periodSummary(period) {
+  const advances = period ? await db.advances.where('periodId').equals(period.id).toArray() : [];
+  const purchases = period ? await db.purchases.where('periodId').equals(period.id).toArray() : [];
+  const active = purchases.filter(p => p.status === 'active');
+  const issued = sumAmounts(advances);
+  const spent = sumAmounts(active);
+  const ret = period ? period.ret : 0;
+  return {
+    advances,
+    purchases,
+    issued,
+    spent,
+    noDoc: sumAmounts(active.filter(p => p.docType === 'none')),
+    count: active.length,
+    balance: issued - spent - ret,
+  };
+}
+
+/* Запись. Эти функции вызываются только внутри транзакции. */
+
+async function nextCounter(key) {
+  const row = await db.counters.get(key);
+  const value = (row ? row.value : 0) + 1;
+  await db.counters.put({ key, value });
+  return value;
+}
+
+// Одновременно открыт один период. Новый создаётся при первой операции после закрытия прошлого.
+async function ensureOpenPeriod(date) {
+  const open = await getOpenPeriod();
+  if (open) return open;
+  const year = date.slice(0, 4);
+  const seq = await nextCounter(`period-${year}`);
+  const period = {
+    number: `П-${year}-${String(seq).padStart(2, '0')}`,
+    status: 'open',
+    opened: date,
+    closed: null,
+    ret: 0,
+    revision: 0,
+  };
+  period.id = await db.periods.add(period);
+  return period;
+}
+
+async function findOrCreateSupplier(name, place) {
+  const known = await db.suppliers.where('name').equalsIgnoreCase(name).first();
+  if (!known) return db.suppliers.add({ name, place, phone: '', comment: '', archived: false });
+  if (place && !known.place) await db.suppliers.update(known.id, { place });
+  return known.id;
+}
+
+async function assertNameFree(table, name, id) {
+  const twin = await table.where('name').equalsIgnoreCase(name).first();
+  if (twin && twin.id !== id) throw new NameTakenError();
+}
+
+// Записывает только реально изменённые поля и каждое из них — в журнал.
+async function applyChanges(table, entity, record, changes) {
+  const diff = {};
+  for (const [field, after] of Object.entries(changes)) {
+    const before = record[field];
+    if (JSON.stringify(before) === JSON.stringify(after)) continue;
+    diff[field] = after;
+    await db.auditLog.add({ entity, entityId: record.id, field, before, after, at: nowLocal() });
+  }
+  if (Object.keys(diff).length) await table.update(record.id, diff);
+}
+
+// Закрытый период и сторнированная закупка не редактируются.
+async function getEditablePurchase(id) {
+  const purchase = await db.purchases.get(id);
+  const period = await db.periods.get(purchase.periodId);
+  if (purchase.status !== 'active' || period.status !== 'open') throw new Error('Закупка не редактируется');
+  return purchase;
+}
+
+/* Операции */
+
+function addAdvance({ amount, method, by, date }) {
+  return db.transaction('rw', db.advances, db.periods, db.counters, async () => {
+    const period = await ensureOpenPeriod(date);
+    await db.advances.add({ periodId: period.id, date, amount, method, by, comment: '' });
+  });
+}
+
+// Фото сжимается до вызова: внутри транзакции нельзя ждать ничего, кроме самой базы.
+// photos: [{ kind: 'receipt' | 'goods', blob }].
+function savePurchase({ amount, supplierName, place, purposeId, docType, payment, comment }, photos) {
+  const dt = nowLocal();
+  const year = Number(dt.slice(0, 4));
+  return db.transaction('rw', db.purchases, db.counters, db.photos, db.suppliers, db.periods, async () => {
+    const period = await ensureOpenPeriod(dt.slice(0, 10));
+    const supplierId = await findOrCreateSupplier(supplierName, place);
+    const no = await nextCounter(purchaseCounterKey(year));
+    const id = await db.purchases.add({
+      year, no, periodId: period.id, dt, supplierId, place, purposeId, amount,
+      payment, docType, comment, items: [], status: 'active', stornoReason: null,
+    });
+    await db.photos.bulkAdd(photos.map(photo => ({ ...photo, purchaseId: id })));
+    return { id, no, periodId: period.id };
+  });
+}
+
+function updatePurchase(id, { amount, supplierName, place, purposeId, docType, payment, comment }) {
+  return db.transaction('rw', db.purchases, db.periods, db.suppliers, db.auditLog, async () => {
+    const purchase = await getEditablePurchase(id);
+    const supplierId = await findOrCreateSupplier(supplierName, place);
+    const changes = { supplierId, place, purposeId, docType, payment, comment };
+    // Сумма закупки с позициями считается только по ним.
+    if (!purchase.items.length) changes.amount = amount;
+    await applyChanges(db.purchases, 'purchase', purchase, changes);
+  });
+}
+
+// Пустой список убирает позиции, сумма закупки при этом остаётся прежней.
+function savePurchaseItems(id, items) {
+  return db.transaction('rw', db.purchases, db.periods, db.auditLog, async () => {
+    const purchase = await getEditablePurchase(id);
+    const changes = { items };
+    if (items.length) changes.amount = items.reduce((sum, item) => sum + item.sum, 0);
+    await applyChanges(db.purchases, 'purchase', purchase, changes);
+  });
+}
+
+function stornoPurchase(id, reason) {
+  return db.transaction('rw', db.purchases, db.periods, db.auditLog, async () => {
+    const purchase = await getEditablePurchase(id);
+    await applyChanges(db.purchases, 'purchase', purchase, { status: 'storno', stornoReason: reason });
+  });
+}
+
+function saveSupplier(id, changes) {
+  return db.transaction('rw', db.suppliers, db.auditLog, async () => {
+    await assertNameFree(db.suppliers, changes.name, id);
+    await applyChanges(db.suppliers, 'supplier', await db.suppliers.get(id), changes);
+  });
+}
+
+function addPurpose(name) {
+  return db.transaction('rw', db.purposes, db.auditLog, async () => {
+    await assertNameFree(db.purposes, name);
+    const id = await db.purposes.add({ name, active: true });
+    await db.auditLog.add({ entity: 'purpose', entityId: id, field: 'name', before: null, after: name, at: nowLocal() });
+  });
+}
+
+function savePurpose(id, changes) {
+  return db.transaction('rw', db.purposes, db.auditLog, async () => {
+    await assertNameFree(db.purposes, changes.name, id);
+    const others = await db.purposes.filter(p => p.active && p.id !== id).count();
+    // Без действующих назначений форму закупки нечем заполнить.
+    if (!changes.active && !others) throw new LastPurposeError();
+    await applyChanges(db.purposes, 'purpose', await db.purposes.get(id), changes);
+  });
+}
+
+const setSetting = (key, value) => db.settings.put({ key, value });
+
+function openNewPeriod() {
+  return db.transaction('rw', db.periods, db.counters, () => ensureOpenPeriod(nowLocal().slice(0, 10)));
+}
+
+function closePeriod(id, ret) {
+  return db.transaction('rw', db.periods, db.advances, db.purchases, db.auditLog, async () => {
+    const period = await db.periods.get(id);
+    if (period.status !== 'open') throw new Error('Период уже закрыт');
+    const { issued, spent } = await periodSummary(period);
+    if (ret > Math.max(issued - spent, 0)) throw new Error('Возврат больше остатка');
+    await applyChanges(db.periods, 'period', period, { status: 'closed', closed: nowLocal().slice(0, 10), ret });
+  });
+}
+
+// Открытым может быть только один период, поэтому при открытом переоткрыть нельзя.
+function reopenPeriod(id, reason) {
+  return db.transaction('rw', db.periods, db.auditLog, async () => {
+    if (await getOpenPeriod()) throw new PeriodOpenError();
+    const period = await db.periods.get(id);
+    await applyChanges(db.periods, 'period', period, {
+      status: 'open', closed: null, revision: period.revision + 1, reopenReason: reason,
+    });
+  });
+}
+
+// Полная замена без слияния. Любая ошибка откатывает всё целиком, и старые данные остаются.
+function restoreAll(tables, exportedAt) {
+  return db.transaction('rw', db.tables, async () => {
+    for (const table of db.tables) {
+      await table.clear();
+      await table.bulkAdd(tables[table.name]);
+    }
+    await setSetting('lastBackupAt', exportedAt);
+  });
+}

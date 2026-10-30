@@ -1,0 +1,613 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>:root{padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom)}body{margin:0}[hidden]{display:none!important}img{max-width:100%}</style>
+<title>Подотчёт закупщика</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500&family=IBM+Plex+Sans+Condensed:wght@600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: one phone column, steel "plate" with the balance on top, ledger list below, fixed tab bar */
+:root{
+  --bg:#EDF0F3; --surface:#FFFFFF; --ink:#16202A; --muted:#5A6774; --line:#D4DAE0;
+  --accent:#1F5BD8; --accent-ink:#FFFFFF; --accent-soft:#E3EBFB;
+  --plate:#1B2A38; --plate-ink:#F2F5F8; --plate-muted:#A9B7C5;
+  --warn:#9A5B00; --warn-bg:#FFF2D6; --bad:#B8322A; --bad-bg:#FBE6E3; --good:#1D7448;
+  --f-display:"IBM Plex Sans Condensed","Arial Narrow",system-ui,sans-serif;
+  --f-body:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --f-mono:"IBM Plex Mono",ui-monospace,"SF Mono",Menlo,monospace;
+  --r:10px;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --bg:#0F151B; --surface:#18212A; --ink:#E5EAEF; --muted:#93A1AE; --line:#2B3743;
+  --accent:#6A97F7; --accent-ink:#0B1220; --accent-soft:#1D2B45;
+  --plate:#24323F; --plate-ink:#EEF2F6; --plate-muted:#9DADBC;
+  --warn:#F0B44C; --warn-bg:#3A2C10; --bad:#F07C70; --bad-bg:#3B1D1A; --good:#52C48C;
+  color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#0F151B; --surface:#18212A; --ink:#E5EAEF; --muted:#93A1AE; --line:#2B3743;
+  --accent:#6A97F7; --accent-ink:#0B1220; --accent-soft:#1D2B45;
+  --plate:#24323F; --plate-ink:#EEF2F6; --plate-muted:#9DADBC;
+  --warn:#F0B44C; --warn-bg:#3A2C10; --bad:#F07C70; --bad-bg:#3B1D1A; --good:#52C48C;
+  color-scheme:dark}
+html,body{height:100%}
+body{background:var(--bg);color:var(--ink);font:15px/1.45 var(--f-body);-webkit-tap-highlight-color:transparent}
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:10;background:var(--bg)}
+*{box-sizing:border-box}
+button,input,select,textarea{font:inherit;color:inherit}
+.app{max-width:460px;margin:0 auto;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));padding-block:12px 110px}
+.num{font-family:var(--f-mono);font-variant-numeric:tabular-nums}
+.tnum{font-variant-numeric:tabular-nums}
+h1,h2,h3{font-family:var(--f-display);margin:0;text-wrap:balance;letter-spacing:.01em}
+.label{font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);font-weight:600}
+.muted{color:var(--muted)}
+.stack{display:flex;flex-direction:column;gap:12px}
+.row{display:flex;align-items:center;gap:10px}
+.spacer{flex:1}
+
+/* top bar */
+.top{position:sticky;top:env(safe-area-inset-top,0px);z-index:5;background:var(--bg);display:flex;align-items:center;gap:8px;padding:6px 0 10px}
+.top h2{font-size:20px}
+.back{border:0;background:transparent;padding:8px 10px 8px 0;font-size:16px;color:var(--accent);font-weight:600;cursor:pointer;min-height:44px}
+.brand{display:flex;align-items:baseline;gap:8px;padding:6px 0 12px}
+.brand h1{font-size:22px}
+.brand .org{color:var(--muted);font-size:13px}
+
+/* plate */
+.plate{background:var(--plate);color:var(--plate-ink);border-radius:14px;padding:18px 18px 16px;position:relative;overflow:hidden}
+.plate::after{content:"";position:absolute;inset:0;pointer-events:none;opacity:.07;
+  background:repeating-linear-gradient(45deg,currentColor 0 2px,transparent 2px 9px),repeating-linear-gradient(-45deg,currentColor 0 2px,transparent 2px 9px);
+  -webkit-mask:linear-gradient(105deg,transparent 45%,#000 100%);mask:linear-gradient(105deg,transparent 45%,#000 100%)}
+.plate .label{color:var(--plate-muted)}
+.bal{font-family:var(--f-display);font-weight:700;font-size:44px;line-height:1.05;margin:6px 0 2px;font-variant-numeric:tabular-nums;letter-spacing:-.01em}
+.bal small{font-size:20px;font-weight:600;margin-left:4px;color:var(--plate-muted)}
+.bal.neg{color:#FF9C8F}
+.plate-meta{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:14px;padding-top:12px;border-top:1px solid color-mix(in srgb,var(--plate-ink) 18%,transparent)}
+.plate-meta div{display:flex;flex-direction:column;gap:2px}
+.plate-meta b{font-family:var(--f-mono);font-weight:500;font-size:15px;font-variant-numeric:tabular-nums}
+.pill{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;padding:3px 9px;border-radius:999px;background:color-mix(in srgb,var(--plate-ink) 14%,transparent)}
+
+/* buttons */
+.btn{appearance:none;border:1px solid var(--line);background:var(--surface);border-radius:var(--r);min-height:48px;padding:10px 16px;font-weight:600;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:8px}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+.btn.danger{color:var(--bad);border-color:color-mix(in srgb,var(--bad) 40%,var(--line))}
+.btn.warnb{background:var(--warn);border-color:var(--warn);color:var(--surface)}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+.btn:focus-visible,.chip:focus-within,.tab:focus-visible,.back:focus-visible,.item:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.btn-row{display:grid;grid-template-columns:1.4fr 1fr;gap:10px}
+.btn.full{width:100%}
+
+/* banners */
+.note{border-radius:var(--r);padding:10px 12px;font-size:14px;display:flex;gap:10px;align-items:flex-start}
+.note.warn{background:var(--warn-bg);color:var(--warn)}
+.note.bad{background:var(--bad-bg);color:var(--bad)}
+.note.info{background:var(--accent-soft);color:var(--accent)}
+.note b{font-weight:600}
+
+/* list */
+.section-h{display:flex;align-items:baseline;justify-content:space-between;margin-top:6px}
+.section-h h3{font-size:17px}
+.list{background:var(--surface);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+.item{display:grid;grid-template-columns:52px 1fr auto;gap:10px;align-items:center;padding:12px 14px;border:0;border-top:1px solid var(--line);background:transparent;width:100%;text-align:left;cursor:pointer}
+.item:first-child{border-top:0}
+.item .no{font-family:var(--f-mono);font-size:13px;color:var(--muted)}
+.item .t{font-weight:600;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.item .s{font-size:13px;color:var(--muted);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.item .a{font-family:var(--f-mono);font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}
+.item.storno .t,.item.storno .a{text-decoration:line-through;color:var(--muted)}
+.tag{display:inline-block;font-size:11px;font-weight:600;padding:1px 6px;border-radius:4px;margin-left:4px;vertical-align:1px}
+.tag.warn{background:var(--warn-bg);color:var(--warn)}
+.tag.bad{background:var(--bad-bg);color:var(--bad)}
+.tag.adv{background:var(--accent-soft);color:var(--accent)}
+.empty{padding:22px 16px;text-align:center;color:var(--muted)}
+
+/* form */
+.field{display:flex;flex-direction:column;gap:6px}
+.input{width:100%;min-height:48px;border:1px solid var(--line);background:var(--surface);border-radius:var(--r);padding:10px 12px;font-size:16px}
+.input:focus{outline:2px solid var(--accent);outline-offset:-1px;border-color:transparent}
+.input.big{font-family:var(--f-display);font-weight:700;font-size:30px;min-height:60px;font-variant-numeric:tabular-nums}
+.input[readonly]{background:var(--bg)}
+textarea.input{min-height:70px;resize:vertical}
+.chips{display:flex;flex-wrap:wrap;gap:8px}
+.chip{position:relative}
+.chip input{position:absolute;opacity:0;inset:0;margin:0;cursor:pointer}
+.chip span{display:inline-flex;align-items:center;min-height:40px;padding:8px 13px;border:1px solid var(--line);border-radius:999px;background:var(--surface);font-size:14px;font-weight:500}
+.chip input:checked + span{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+.chip.warnchip input:checked + span{background:var(--warn);border-color:var(--warn);color:var(--surface)}
+.photo{display:flex;align-items:center;gap:14px;border:1.5px dashed var(--line);border-radius:12px;padding:14px;background:var(--surface);cursor:pointer;min-height:84px}
+.photo .ic{width:52px;height:52px;border-radius:10px;background:var(--accent-soft);color:var(--accent);display:grid;place-items:center;flex:none}
+.photo img{width:64px;height:64px;object-fit:cover;border-radius:8px;flex:none}
+.switch{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 14px;background:var(--surface);border:1px solid var(--line);border-radius:var(--r);cursor:pointer}
+.switch input{width:46px;height:28px;appearance:none;border-radius:99px;background:var(--line);position:relative;cursor:pointer;flex:none;transition:background .15s}
+.switch input::after{content:"";position:absolute;top:3px;left:3px;width:22px;height:22px;border-radius:50%;background:var(--surface);transition:transform .15s;box-shadow:0 1px 2px rgba(0,0,0,.25)}
+.switch input:checked{background:var(--accent)}
+.switch input:checked::after{transform:translateX(18px)}
+.items{display:flex;flex-direction:column;gap:10px}
+.irow{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:10px;display:flex;flex-direction:column;gap:8px}
+.igrid{display:grid;grid-template-columns:1fr 1fr 1.3fr;gap:8px}
+.igrid .input{min-height:42px;font-size:15px;padding:8px 10px}
+.irow .input.name{min-height:42px;font-size:15px}
+.ifoot{display:flex;justify-content:space-between;align-items:center;font-size:14px}
+.linkbtn{border:0;background:none;color:var(--accent);font-weight:600;cursor:pointer;padding:6px 0;min-height:36px}
+.linkbtn.bad{color:var(--bad)}
+.sticky-save{position:fixed;left:0;right:0;bottom:0;z-index:6;background:linear-gradient(to top,var(--bg) 70%,transparent);padding:16px max(16px,env(safe-area-inset-right,0px)) calc(12px + env(safe-area-inset-bottom,0px)) max(16px,env(safe-area-inset-left,0px))}
+.sticky-save .inner{max-width:428px;margin:0 auto}
+
+/* done */
+.done{text-align:center;padding:30px 0 10px;display:flex;flex-direction:column;align-items:center;gap:8px}
+.bignum{font-family:var(--f-display);font-weight:700;font-size:96px;line-height:1;letter-spacing:.02em;font-variant-numeric:tabular-nums;border:3px solid var(--ink);border-radius:12px;padding:10px 22px 6px;margin:8px 0}
+
+/* card + tables */
+.kv{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:4px 14px}
+.kv div{display:flex;justify-content:space-between;gap:12px;padding:10px 0;border-top:1px solid var(--line)}
+.kv div:first-child{border-top:0}
+.kv dt{color:var(--muted);margin:0}
+.kv dd{margin:0;text-align:right;font-weight:500;min-width:0}
+.scroll{overflow-x:auto;background:var(--surface);border:1px solid var(--line);border-radius:12px}
+table{border-collapse:collapse;width:100%;font-size:13.5px}
+th,td{padding:9px 10px;text-align:left;border-top:1px solid var(--line);white-space:nowrap}
+thead th{border-top:0;font-size:11.5px;letter-spacing:.05em;text-transform:uppercase;color:var(--muted);font-weight:600}
+td.r,th.r{text-align:right;font-family:var(--f-mono);font-variant-numeric:tabular-nums}
+tr.struck td{text-decoration:line-through;color:var(--muted)}
+tfoot td{font-weight:600}
+.amount-hero{font-family:var(--f-display);font-weight:700;font-size:38px;font-variant-numeric:tabular-nums}
+.ph-none{display:flex;align-items:center;gap:10px;padding:14px;border:1px dashed var(--line);border-radius:12px;color:var(--muted);font-size:14px}
+.photo-full{width:100%;border-radius:12px;border:1px solid var(--line)}
+
+/* report */
+.sum{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:4px 14px}
+.sum div{display:flex;justify-content:space-between;padding:10px 0;border-top:1px solid var(--line);gap:10px}
+.sum div:first-child{border-top:0}
+.sum .v{font-family:var(--f-mono);font-variant-numeric:tabular-nums}
+.sum .total{font-weight:700}
+.sum .total .v{font-size:17px}
+.bars{display:flex;flex-direction:column;gap:12px;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px}
+.bar-h{display:flex;justify-content:space-between;font-size:14px;margin-bottom:5px;gap:10px}
+.bar-h .v{font-family:var(--f-mono);font-variant-numeric:tabular-nums}
+.bar{height:10px;border-radius:5px;background:var(--bg);overflow:hidden}
+.bar i{display:block;height:100%;background:var(--accent);border-radius:5px}
+.export{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+
+/* tab bar */
+.tabbar{position:fixed;left:0;right:0;bottom:0;z-index:6;background:var(--surface);border-top:1px solid var(--line);padding:6px max(16px,env(safe-area-inset-right,0px)) calc(6px + env(safe-area-inset-bottom,0px)) max(16px,env(safe-area-inset-left,0px))}
+.tabbar .inner{max-width:428px;margin:0 auto;display:grid;grid-template-columns:repeat(3,1fr)}
+.tab{border:0;background:none;display:flex;flex-direction:column;align-items:center;gap:2px;padding:6px 0;font-size:11.5px;font-weight:600;color:var(--muted);cursor:pointer;min-height:48px}
+.tab svg{width:22px;height:22px}
+.tab[aria-current="true"]{color:var(--accent)}
+
+.toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(84px + env(safe-area-inset-bottom,0px));background:var(--ink);color:var(--bg);padding:10px 16px;border-radius:10px;font-size:14px;z-index:20;max-width:calc(100% - 32px);box-shadow:0 6px 20px rgba(0,0,0,.25)}
+.demo{font-size:12px;color:var(--muted);text-align:center;margin-top:18px}
+@media (prefers-reduced-motion: reduce){*{transition:none!important;animation:none!important}}
+</style>
+
+</head>
+<body>
+<div class="app">
+
+<!-- HOME -->
+<section id="v-home" class="stack">
+  <div class="brand"><h1>Подотчёт</h1><span class="org" id="h-org">Азия Сталь</span><span class="spacer"></span><span class="label" id="h-date"></span></div>
+  <div class="plate">
+    <div class="row"><span class="label">Остаток аванса</span><span class="spacer"></span><span class="pill" id="h-period"></span></div>
+    <div class="bal" id="h-bal"></div>
+    <div class="plate-meta">
+      <div><span class="label">Выдано</span><b id="h-in"></b></div>
+      <div><span class="label">Израсходовано</span><b id="h-out"></b></div>
+    </div>
+  </div>
+  <div id="h-actions" class="btn-row">
+    <button class="btn primary" id="b-new" type="button"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>Закупка</button>
+    <button class="btn" id="b-adv" type="button">+ Выдача</button>
+  </div>
+  <div id="h-notes" class="stack"></div>
+  <div class="section-h"><h3>Операции периода</h3><span class="muted tnum" id="h-count"></span></div>
+  <div class="list" id="h-list"></div>
+  <p class="demo">Демо-версия с примерами данных. Изменения хранятся только в этом браузере.</p>
+</section>
+
+<!-- NEW PURCHASE -->
+<section id="v-new" class="stack" hidden>
+  <div class="top"><button class="back" type="button" data-go="home">‹ Назад</button><h2>Новая закупка</h2><span class="spacer"></span><span class="label num" id="n-no"></span></div>
+  <label class="photo" for="f-photo" id="f-photo-box">
+    <span class="ic"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg></span>
+    <span><b>Сфотографировать чек</b><br><span class="muted" style="font-size:13px">Резервная копия. Бумажный чек сдаётся в бухгалтерию.</span></span>
+  </label>
+  <input type="file" id="f-photo" accept="image/*" capture="environment" hidden>
+  <div class="field"><label class="label" for="f-amount">Сумма, сом</label>
+    <input class="input big" id="f-amount" inputmode="decimal" placeholder="0" autocomplete="off"></div>
+  <label class="switch" for="f-itemized"><span><b>Добавить позиции</b><br><span class="muted" style="font-size:13px">Сумма посчитается по позициям</span></span><input type="checkbox" id="f-itemized"></label>
+  <div id="f-items-wrap" class="stack" hidden>
+    <div class="items" id="f-items"></div>
+    <button class="linkbtn" type="button" id="f-add-item">+ Ещё позиция</button>
+  </div>
+  <div class="field"><label class="label" for="f-supplier">Поставщик</label>
+    <input class="input" id="f-supplier" list="dl-sup" placeholder="Начните вводить название" autocomplete="off">
+    <datalist id="dl-sup"></datalist></div>
+  <div class="field"><label class="label" for="f-place">Место</label>
+    <input class="input" id="f-place" placeholder="Рынок, ряд, контейнер" autocomplete="off"></div>
+  <div class="field"><span class="label">Назначение</span><div class="chips" id="f-purpose"></div></div>
+  <div class="field"><span class="label">Документ</span><div class="chips" id="f-doc"></div></div>
+  <div class="field"><span class="label">Оплата</span><div class="chips" id="f-pay"></div></div>
+  <div class="field"><label class="label" for="f-comment">Комментарий</label>
+    <textarea class="input" id="f-comment" placeholder="Что купили, если без позиций"></textarea></div>
+  <div id="f-warn" class="stack"></div>
+  <div class="sticky-save"><div class="inner"><button class="btn primary full" id="f-save" type="button">Сохранить закупку</button></div></div>
+</section>
+
+<!-- DONE -->
+<section id="v-done" hidden>
+  <div class="done">
+    <span class="label">Закупка сохранена</span>
+    <div class="bignum" id="d-no">049</div>
+    <h2 style="font-size:22px">Запишите этот номер на чеке</h2>
+    <p class="muted" id="d-sum" style="margin:0"></p>
+  </div>
+  <div class="stack" style="margin-top:18px">
+    <button class="btn primary full" type="button" id="d-more">Ещё закупка</button>
+    <button class="btn full" type="button" data-go="home">На главную</button>
+  </div>
+</section>
+
+<!-- CARD -->
+<section id="v-card" class="stack" hidden>
+  <div class="top"><button class="back" type="button" data-go="home">‹ Назад</button><h2 id="c-title"></h2></div>
+  <div id="c-body" class="stack"></div>
+</section>
+
+<!-- ADVANCE -->
+<section id="v-adv" class="stack" hidden>
+  <div class="top"><button class="back" type="button" data-go="home">‹ Назад</button><h2>Выдача аванса</h2></div>
+  <div class="field"><label class="label" for="a-amount">Сумма, сом</label>
+    <input class="input big" id="a-amount" inputmode="decimal" placeholder="0" autocomplete="off"></div>
+  <div class="field"><span class="label">Способ</span><div class="chips" id="a-method"></div></div>
+  <div class="field"><label class="label" for="a-by">Кто выдал</label>
+    <input class="input" id="a-by" value="Бухгалтерия" autocomplete="off"></div>
+  <div class="field"><label class="label" for="a-date">Дата</label>
+    <input class="input" id="a-date" type="date"></div>
+  <button class="btn primary full" type="button" id="a-save">Добавить выдачу</button>
+</section>
+
+<!-- REPORT -->
+<section id="v-report" class="stack" hidden>
+  <div class="brand"><h1>Авансовый отчёт</h1><span class="spacer"></span><span class="label" id="r-status"></span></div>
+  <p class="muted" style="margin:-8px 0 0" id="r-sub"></p>
+  <div class="sum" id="r-sum"></div>
+  <div class="section-h"><h3>По назначениям</h3></div>
+  <div class="bars" id="r-bars"></div>
+  <div class="section-h"><h3>Реестр закупок</h3><span class="muted" style="font-size:13px">листайте вбок →</span></div>
+  <div class="scroll"><table id="r-table"></table></div>
+  <div class="export">
+    <button class="btn" type="button" id="r-xlsx">Excel</button>
+    <button class="btn" type="button" id="r-pdf">PDF</button>
+  </div>
+  <button class="btn danger full" type="button" id="r-close">Закрыть период</button>
+</section>
+
+<!-- CLOSE PERIOD -->
+<section id="v-close" class="stack" hidden>
+  <div class="top"><button class="back" type="button" data-go="report">‹ Отчёт</button><h2>Закрытие периода</h2></div>
+  <div class="sum" id="cl-sum"></div>
+  <div class="field"><label class="label" for="cl-ret">Возврат остатка в кассу, сом</label>
+    <input class="input big" id="cl-ret" inputmode="decimal" autocomplete="off"></div>
+  <div id="cl-note"></div>
+  <label class="switch" for="cl-check"><span id="cl-check-l">Бумажные чеки сданы в бухгалтерию</span><input type="checkbox" id="cl-check"></label>
+  <button class="btn danger full" type="button" id="cl-do" disabled>Закрыть период</button>
+  <p class="muted" style="font-size:13px;margin:0">После закрытия закупки периода нельзя изменить или сторнировать. Перед закрытием в рабочей версии создаётся бэкап.</p>
+</section>
+
+<!-- MORE -->
+<section id="v-more" class="stack" hidden>
+  <div class="brand"><h1>Настройки</h1></div>
+  <div class="field"><label class="label" for="s-name">ФИО закупщика</label><input class="input" id="s-name" autocomplete="off"></div>
+  <div class="field"><label class="label" for="s-org">Организация</label><input class="input" id="s-org" autocomplete="off"></div>
+  <div class="section-h"><h3>Поставщики</h3><span class="muted tnum" id="s-sup-n"></span></div>
+  <div class="list" id="s-sup"></div>
+  <div class="section-h"><h3>Назначения</h3></div>
+  <div class="list" id="s-pur"></div>
+  <div class="field"><label class="label" for="s-newpur">Новое назначение</label>
+    <div class="row"><input class="input" id="s-newpur" placeholder="Например, Объект: Склад" autocomplete="off"><button class="btn" type="button" id="s-addpur">Добавить</button></div></div>
+  <div class="section-h"><h3>Бэкап</h3></div>
+  <div class="note warn" id="s-backup-note"></div>
+  <button class="btn full" type="button" id="s-backup">Сохранить копию данных</button>
+  <button class="btn danger full" type="button" id="s-reset">Сбросить демо-данные</button>
+</section>
+
+</div>
+
+<nav class="tabbar" id="tabbar"><div class="inner">
+  <button class="tab" type="button" data-tab="home"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="18" height="13" rx="2"/><path d="M3 10h18M7 15h4"/></svg>Подотчёт</button>
+  <button class="tab" type="button" data-tab="report"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h9l4 4v14H6z"/><path d="M14 3v5h5M9 13h7M9 17h7"/></svg>Отчёт</button>
+  <button class="tab" type="button" data-tab="more"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h10"/></svg>Настройки</button>
+</div></nav>
+<div class="toast" id="toast" hidden></div>
+
+<script>
+(function(){
+const KEY='zakup-demo-v1';
+const DOC={ekkm:'Чек ЭККМ',tov:'Товарный чек',nakl:'Накладная',esf:'ЭСФ',none:'Без документа'};
+const PAY={cash:'Наличные',transfer:'Перевод'};
+const UNITS=['шт','м','п.м.','м²','м³','кг','т','л','уп.','лист','меш.','рулон'];
+
+function seed(){
+  const it=(name,unit,qty,price)=>({name,unit,qty,price,sum:Math.round(qty*price)});
+  const P=[
+    {no:41,dt:'2026-10-20T10:40',sup:'s1',place:'Стройрынок, ряд 3',pur:'p1',doc:'ekkm',pay:'cash',items:[it('Арматура А500С d12','т',0.85,6800000),it('Проволока вязальная 1,2 мм','кг',10,18000)]},
+    {no:42,dt:'2026-10-20T12:15',sup:'s2',place:'Стройрынок, ряд 7, конт. 34',pur:'p1',doc:'nakl',pay:'cash',items:[it('Профлист С21 0,5 мм RAL 7004','лист',24,145000),it('Саморезы кровельные 4,8×35','уп.',6,78000)]},
+    {no:43,dt:'2026-10-21T09:50',sup:'s3',place:'',pur:'p2',doc:'tov',pay:'cash',amount:1260000,comment:'Цемент М400, 14 мешков'},
+    {no:44,dt:'2026-10-22T15:30',sup:'s4',place:'Стройрынок, павильон Б',pur:'p2',doc:'ekkm',pay:'transfer',items:[it('Кабель ВВГнг 3×2,5','м',100,9500),it('Автомат 1P 16А','шт',6,42000)]},
+    {no:45,dt:'2026-10-23T11:05',sup:'s1',place:'Стройрынок, ряд 3',pur:'p3',doc:'esf',pay:'transfer',items:[it('Труба профильная 40×20×2','п.м.',60,21000),it('Лист г/к 3 мм 1250×2500','лист',2,980000),it('Электроды МР-3 d3','кг',15,26000)]},
+    {no:46,dt:'2026-10-24T13:20',sup:'s5',place:'Стройрынок, ряд 11',pur:'p3',doc:'none',pay:'cash',amount:345000,comment:'Болты М10, гайки, шайбы. Чек не дали'},
+    {no:47,dt:'2026-10-25T10:10',sup:'s2',place:'Стройрынок, ряд 7, конт. 34',pur:'p1',doc:'nakl',pay:'cash',amount:890000,status:'storno',reason:'Ошибка в сумме, введена заново как №048'},
+    {no:48,dt:'2026-10-28T16:45',sup:'s2',place:'Стройрынок, ряд 7, конт. 34',pur:'p1',doc:'nakl',pay:'cash',amount:980000,comment:'Конёк, планки примыкания'}
+  ].map((p,i)=>{p.id='x'+(i+1);p.period='P7';p.status=p.status||'active';if(p.items)p.amount=p.items.reduce((s,x)=>s+x.sum,0);return p;});
+  return {
+    user:{name:'Иванов И. И.',org:'Азия Сталь'},
+    counter:48,lastBackup:'2026-10-20',
+    suppliers:[{id:'s1',name:'Металлобаза «Темир»'},{id:'s2',name:'ИП Асанов (кровля)'},{id:'s3',name:'Кирпич-Сервис'},{id:'s4',name:'Электротовары 24'},{id:'s5',name:'ИП Токтосунова (крепёж)'}],
+    purposes:[{id:'p1',name:'Цех №2'},{id:'p2',name:'Ремонт офиса'},{id:'p3',name:'Производство'}],
+    periods:[{id:'P7',number:'П-2026-07',opened:'2026-10-20',closed:null,status:'open',ret:0}],
+    advances:[{id:'a1',period:'P7',date:'2026-10-20',amount:15000000,method:'cash',by:'Бухгалтерия'},{id:'a2',period:'P7',date:'2026-10-27',amount:8000000,method:'transfer',by:'Бухгалтерия'}],
+    purchases:P,last:{pur:'p1',doc:'nakl',pay:'cash'}
+  };
+}
+let S;
+try{S=JSON.parse(localStorage.getItem(KEY))}catch(e){S=null}
+if(!S||!S.periods)S=seed();
+let warnedQuota=false;
+function save(){try{localStorage.setItem(KEY,JSON.stringify(S))}catch(e){if(!warnedQuota){warnedQuota=true;toast('Превью не смогло сохранить фото после перезагрузки. В рабочей версии хранилище больше.')}}}
+
+const $=id=>document.getElementById(id);
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const money=t=>{const neg=t<0;t=Math.abs(t);const s=(t/100).toLocaleString('ru-RU',{minimumFractionDigits:t%100?2:0,maximumFractionDigits:2});return (neg?'−':'')+s;};
+const parseMoney=v=>{const n=parseFloat(String(v).replace(/\s/g,'').replace(',','.'));return isFinite(n)?Math.round(n*100):0;};
+const parseNum=v=>{const n=parseFloat(String(v).replace(/\s/g,'').replace(',','.'));return isFinite(n)?n:0;};
+const pad3=n=>String(n).padStart(3,'0');
+const dShort=iso=>{const [y,m,d]=iso.slice(0,10).split('-');return d+'.'+m;};
+const dFull=iso=>{const [y,m,d]=iso.slice(0,10).split('-');return d+'.'+m+'.'+y;};
+const nowLocal=()=>{const d=new Date();const z=n=>String(n).padStart(2,'0');return d.getFullYear()+'-'+z(d.getMonth()+1)+'-'+z(d.getDate())+'T'+z(d.getHours())+':'+z(d.getMinutes());};
+const sup=id=>(S.suppliers.find(s=>s.id===id)||{name:'—'}).name;
+const pur=id=>(S.purposes.find(s=>s.id===id)||{name:'—'}).name;
+const period=()=>S.periods[S.periods.length-1];
+const purchasesOf=p=>S.purchases.filter(x=>x.period===p.id);
+const advancesOf=p=>S.advances.filter(x=>x.period===p.id);
+function totals(p){
+  const inn=advancesOf(p).reduce((s,a)=>s+a.amount,0);
+  const act=purchasesOf(p).filter(x=>x.status==='active');
+  const out=act.reduce((s,x)=>s+x.amount,0);
+  const nodoc=act.filter(x=>x.doc==='none').reduce((s,x)=>s+x.amount,0);
+  const storno=purchasesOf(p).filter(x=>x.status==='storno').reduce((s,x)=>s+x.amount,0);
+  return {inn,out,nodoc,storno,ret:p.ret||0,bal:inn-out-(p.ret||0),count:act.length};
+}
+
+let toastT;
+function toast(msg){const t=$('toast');t.textContent=msg;t.hidden=false;clearTimeout(toastT);toastT=setTimeout(()=>t.hidden=true,3200);}
+
+const VIEWS=['home','new','done','card','adv','report','close','more'];
+const TABS=['home','report','more'];
+function show(v){
+  VIEWS.forEach(x=>$('v-'+x).hidden=x!==v);
+  $('tabbar').hidden=!TABS.includes(v);
+  document.querySelectorAll('.tab').forEach(t=>t.setAttribute('aria-current',t.dataset.tab===v?'true':'false'));
+  ({home:renderHome,report:renderReport,more:renderMore}[v]||(()=>{}))();
+  window.scrollTo(0,0);
+}
+document.addEventListener('click',e=>{const g=e.target.closest('[data-go]');if(g)show(g.dataset.go);const t=e.target.closest('[data-tab]');if(t)show(t.dataset.tab);});
+
+/* HOME */
+function renderHome(){
+  const p=period(),T=totals(p),closed=p.status==='closed';
+  $('h-org').textContent=S.user.org;
+  $('h-date').textContent=dFull(nowLocal());
+  $('h-period').textContent=p.number+(closed?' · закрыт':'');
+  $('h-bal').innerHTML=money(T.bal)+'<small>сом</small>';
+  $('h-bal').classList.toggle('neg',T.bal<0);
+  $('h-in').textContent=money(T.inn);
+  $('h-out').textContent=money(T.out);
+  const acts=$('h-actions');
+  if(closed){acts.innerHTML='<button class="btn primary" type="button" id="b-newp" style="grid-column:1/-1">Открыть новый период</button>';$('b-newp').onclick=newPeriod;}
+  else if(!$('b-new')){acts.innerHTML='<button class="btn primary" id="b-new" type="button"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>Закупка</button><button class="btn" id="b-adv" type="button">+ Выдача</button>';bindHome();}
+  const notes=[];
+  const days=Math.floor((Date.now()-new Date(S.lastBackup+'T00:00').getTime())/864e5);
+  if(T.bal<0)notes.push('<div class="note bad"><span>Перерасход <b class="num">'+money(-T.bal)+' сом</b>. Будет отражён в отчёте отдельной строкой.</span></div>');
+  if(T.nodoc>0)notes.push('<div class="note warn"><span>Без документов: <b class="num">'+money(T.nodoc)+' сом</b>. Бухгалтерия может не принять эти расходы.</span></div>');
+  if(days>7)notes.push('<div class="note info"><span>Последний бэкап <b>'+days+' дн. назад</b>. Сохраните копию в Настройках.</span></div>');
+  if(closed)notes.unshift('<div class="note info"><span>Период закрыт '+dFull(p.closed)+'. Возврат в кассу: <b class="num">'+money(p.ret)+' сом</b>.</span></div>');
+  $('h-notes').innerHTML=notes.join('');
+  const ops=[...purchasesOf(p).map(x=>({k:'p',d:x.dt,x})),...advancesOf(p).map(a=>({k:'a',d:a.date+'T00:00',x:a}))].sort((a,b)=>b.d.localeCompare(a.d));
+  $('h-count').textContent=T.count+' закупок';
+  $('h-list').innerHTML=ops.length?ops.map(o=>{
+    if(o.k==='a')return '<div class="item" style="cursor:default"><span class="no">'+dShort(o.x.date)+'</span><span style="min-width:0"><div class="t">Выдача аванса<span class="tag adv">'+(o.x.method==='cash'?'нал':'перевод')+'</span></div><div class="s">'+esc(o.x.by)+'</div></span><span class="a" style="color:var(--good)">+'+money(o.x.amount)+'</span></div>';
+    const x=o.x,st=x.status==='storno';
+    return '<button class="item'+(st?' storno':'')+'" type="button" data-card="'+x.id+'"><span class="no">№'+pad3(x.no)+'<br>'+dShort(x.dt)+'</span><span style="min-width:0"><div class="t">'+esc(sup(x.sup))+'</div><div class="s">'+esc(pur(x.pur))+' · '+DOC[x.doc]+(x.doc==='none'?'<span class="tag warn">нет док.</span>':'')+(st?'<span class="tag bad">сторно</span>':'')+'</div></span><span class="a">−'+money(x.amount)+'</span></button>';
+  }).join(''):'<div class="empty">Операций пока нет. Начните с выдачи аванса.</div>';
+}
+function bindHome(){$('b-new').onclick=()=>openNew();$('b-adv').onclick=openAdv;}
+$('h-list').addEventListener('click',e=>{const b=e.target.closest('[data-card]');if(b)openCard(b.dataset.card);});
+bindHome();
+
+/* NEW PURCHASE */
+let photo=null,noDocConfirmed=false;
+function chips(el,name,opts,val,warnKey){el.innerHTML=opts.map(([k,l])=>'<label class="chip'+(k===warnKey?' warnchip':'')+'"><input type="radio" name="'+name+'" value="'+k+'"'+(k===val?' checked':'')+'><span>'+esc(l)+'</span></label>').join('');}
+const radioVal=n=>(document.querySelector('input[name="'+n+'"]:checked')||{}).value;
+function openNew(){
+  photo=null;noDocConfirmed=false;
+  $('n-no').textContent='№'+pad3(S.counter+1);
+  $('f-amount').value='';$('f-amount').readOnly=false;
+  $('f-itemized').checked=false;$('f-items-wrap').hidden=true;$('f-items').innerHTML='';
+  $('f-supplier').value='';$('f-place').value='';$('f-comment').value='';$('f-warn').innerHTML='';
+  $('dl-sup').innerHTML=S.suppliers.map(s=>'<option value="'+esc(s.name)+'"></option>').join('');
+  resetPhotoBox();
+  chips($('f-purpose'),'pur',S.purposes.map(p=>[p.id,p.name]),S.last.pur);
+  chips($('f-doc'),'doc',Object.entries(DOC),S.last.doc,'none');
+  chips($('f-pay'),'pay',Object.entries(PAY),S.last.pay);
+  $('f-save').textContent='Сохранить закупку';$('f-save').className='btn primary full';
+  show('new');
+}
+function resetPhotoBox(){
+  const box=$('f-photo-box');
+  box.innerHTML=photo?'<img src="'+photo+'" alt="Фото чека"><span><b>Фото прикреплено</b><br><span class="muted" style="font-size:13px">Нажмите, чтобы переснять</span></span>':'<span class="ic"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg></span><span><b>Сфотографировать чек</b><br><span class="muted" style="font-size:13px">Резервная копия. Бумажный чек сдаётся в бухгалтерию.</span></span>';
+}
+$('f-photo').addEventListener('change',e=>{
+  const f=e.target.files&&e.target.files[0];if(!f)return;
+  const url=URL.createObjectURL(f),img=new Image();
+  img.onload=()=>{const m=900,s=Math.min(1,m/Math.max(img.width,img.height)),c=document.createElement('canvas');c.width=Math.round(img.width*s);c.height=Math.round(img.height*s);c.getContext('2d').drawImage(img,0,0,c.width,c.height);URL.revokeObjectURL(url);photo=c.toDataURL('image/jpeg',0.6);resetPhotoBox();};
+  img.onerror=()=>toast('Не удалось открыть фото. Попробуйте снять ещё раз.');
+  img.src=url;e.target.value='';
+});
+let itemSeq=0;
+function addItem(){
+  const id='i'+(++itemSeq),row=document.createElement('div');row.className='irow';row.dataset.row=id;
+  row.innerHTML='<input class="input name" placeholder="Наименование, например Арматура d12" aria-label="Наименование" autocomplete="off" id="'+id+'n">'+
+   '<div class="igrid"><select class="input" aria-label="Единица" id="'+id+'u">'+UNITS.map(u=>'<option>'+u+'</option>').join('')+'</select>'+
+   '<input class="input" inputmode="decimal" placeholder="Кол-во" aria-label="Количество" id="'+id+'q">'+
+   '<input class="input" inputmode="decimal" placeholder="Цена" aria-label="Цена" id="'+id+'p"></div>'+
+   '<div class="ifoot"><span class="muted">Сумма: <b class="num" data-sum>0</b> сом</span><button class="linkbtn bad" type="button" data-del>Удалить</button></div>';
+  $('f-items').appendChild(row);recalc();
+}
+function readItems(){return [...$('f-items').querySelectorAll('.irow')].map(r=>{const id=r.dataset.row,qty=parseNum($(id+'q').value),price=parseMoney($(id+'p').value);return {name:$(id+'n').value.trim(),unit:$(id+'u').value,qty,price,sum:Math.round(qty*price),row:r};});}
+function recalc(){if(!$('f-itemized').checked)return;let t=0;readItems().forEach(i=>{i.row.querySelector('[data-sum]').textContent=money(i.sum);t+=i.sum;});$('f-amount').value=t?money(t).replace(/\s/g,' '):'';}
+$('f-items').addEventListener('input',recalc);
+$('f-items').addEventListener('click',e=>{if(e.target.closest('[data-del]')){e.target.closest('.irow').remove();if(!$('f-items').children.length)addItem();recalc();}});
+$('f-add-item').onclick=addItem;
+$('f-itemized').addEventListener('change',e=>{const on=e.target.checked;$('f-items-wrap').hidden=!on;$('f-amount').readOnly=on;if(on){if(!$('f-items').children.length)addItem();recalc();}});
+document.addEventListener('change',e=>{if(e.target.name==='doc'){noDocConfirmed=false;$('f-save').textContent='Сохранить закупку';$('f-save').className='btn primary full';$('f-warn').innerHTML='';}});
+$('f-save').onclick=()=>{
+  const p=period(),T=totals(p);
+  const itemized=$('f-itemized').checked;
+  let items=null,amount;
+  if(itemized){items=readItems().filter(i=>i.name||i.sum);if(items.some(i=>!i.name||!i.qty||!i.price)){toast('Заполните наименование, количество и цену в каждой позиции.');return;}amount=items.reduce((s,i)=>s+i.sum,0);items=items.map(({row,...r})=>r);}
+  else amount=parseMoney($('f-amount').value);
+  const supName=$('f-supplier').value.trim();
+  if(amount<=0){toast('Введите сумму закупки.');$('f-amount').focus();return;}
+  if(!supName){toast('Укажите поставщика.');$('f-supplier').focus();return;}
+  const doc=radioVal('doc'),warns=[];
+  if(doc==='none'&&!noDocConfirmed){
+    noDocConfirmed=true;
+    warns.push('<div class="note warn"><span>Закупка без документа пойдёт в отчёт отдельной строкой. Бухгалтерия может не принять её в расходы.</span></div>');
+    if(amount>T.bal)warns.push('<div class="note bad"><span>Сумма больше остатка на <b class="num">'+money(amount-T.bal)+' сом</b>. Возникнет перерасход.</span></div>');
+    $('f-warn').innerHTML=warns.join('');$('f-save').textContent='Сохранить без документа';$('f-save').className='btn warnb full';
+    $('f-warn').scrollIntoView({block:'center',behavior:'smooth'});return;
+  }
+  let s=S.suppliers.find(x=>x.name.toLowerCase()===supName.toLowerCase());
+  if(!s){s={id:'s'+Date.now(),name:supName};S.suppliers.push(s);}
+  S.counter+=1;
+  const rec={id:'x'+Date.now(),no:S.counter,period:p.id,dt:nowLocal(),sup:s.id,place:$('f-place').value.trim(),pur:radioVal('pur'),doc,pay:radioVal('pay'),amount,comment:$('f-comment').value.trim(),status:'active',photo};
+  if(items)rec.items=items;
+  S.purchases.push(rec);S.last={pur:rec.pur,doc:rec.doc,pay:rec.pay};save();
+  $('d-no').textContent=pad3(rec.no);
+  const nb=totals(p).bal;
+  $('d-sum').innerHTML='<span class="num">'+money(amount)+'</span> сом · '+esc(s.name)+'<br>Остаток: <span class="num">'+money(nb)+'</span> сом'+(nb<0?' (перерасход)':'');
+  show('done');
+};
+$('d-more').onclick=()=>openNew();
+
+/* CARD */
+function openCard(id){
+  const x=S.purchases.find(p=>p.id===id);if(!x)return;
+  const per=S.periods.find(p=>p.id===x.period),closed=per&&per.status==='closed',st=x.status==='storno';
+  $('c-title').innerHTML='Закупка <span class="num">№'+pad3(x.no)+'</span>';
+  let h='<div class="row"><span class="amount-hero'+(st?' muted':'')+'" style="'+(st?'text-decoration:line-through':'')+'">'+money(x.amount)+' сом</span><span class="spacer"></span>'+(st?'<span class="tag bad">сторно</span>':x.doc==='none'?'<span class="tag warn">нет документа</span>':'')+'</div>';
+  if(st)h+='<div class="note bad"><span><b>Сторнирована.</b> '+esc(x.reason)+'</span></div>';
+  h+='<dl class="kv"><div><dt>Дата</dt><dd class="tnum">'+dFull(x.dt)+', '+x.dt.slice(11,16)+'</dd></div><div><dt>Поставщик</dt><dd>'+esc(sup(x.sup))+'</dd></div>'+(x.place?'<div><dt>Место</dt><dd>'+esc(x.place)+'</dd></div>':'')+'<div><dt>Назначение</dt><dd>'+esc(pur(x.pur))+'</dd></div><div><dt>Документ</dt><dd>'+DOC[x.doc]+'</dd></div><div><dt>Оплата</dt><dd>'+PAY[x.pay]+'</dd></div><div><dt>Период</dt><dd>'+esc(per?per.number:'')+'</dd></div>'+(x.comment?'<div><dt>Комментарий</dt><dd>'+esc(x.comment)+'</dd></div>':'')+'</dl>';
+  if(x.items&&x.items.length){
+    h+='<div class="section-h"><h3>Позиции</h3></div><div class="scroll"><table><thead><tr><th>Наименование</th><th class="r">Кол-во</th><th>Ед.</th><th class="r">Цена</th><th class="r">Сумма</th></tr></thead><tbody>'+x.items.map(i=>'<tr><td>'+esc(i.name)+'</td><td class="r">'+String(i.qty).replace('.',',')+'</td><td>'+esc(i.unit)+'</td><td class="r">'+money(i.price)+'</td><td class="r">'+money(i.sum)+'</td></tr>').join('')+'</tbody><tfoot><tr><td colspan="4">Итого</td><td class="r">'+money(x.amount)+'</td></tr></tfoot></table></div>';
+  }
+  h+='<div class="section-h"><h3>Фото документа</h3></div>';
+  h+=x.photo?'<img class="photo-full" src="'+x.photo+'" alt="Фото документа №'+pad3(x.no)+'">':'<div class="ph-none">Фото не прикреплено. Бумажный документ с номером <b class="num">№'+pad3(x.no)+'</b> в бухгалтерии.</div>';
+  if(!st&&!closed){
+    h+='<div id="c-storno" class="stack"><button class="btn danger full" type="button" id="c-st-open">Сторнировать</button></div>';
+  } else if(closed) h+='<p class="muted" style="font-size:13px;margin:0">Период закрыт, изменения недоступны.</p>';
+  $('c-body').innerHTML=h;
+  const o=$('c-st-open');
+  if(o)o.onclick=()=>{
+    $('c-storno').innerHTML='<div class="field"><label class="label" for="c-reason">Причина сторно</label><textarea class="input" id="c-reason" placeholder="Например, ошибка в сумме"></textarea></div><div class="btn-row"><button class="btn danger" type="button" id="c-st-do">Сторнировать №'+pad3(x.no)+'</button><button class="btn" type="button" id="c-st-cancel">Отмена</button></div><p class="muted" style="font-size:13px;margin:0">Номер не освобождается. Закупка останется в отчёте отдельным блоком и не войдёт в сумму.</p>';
+    $('c-reason').focus();
+    $('c-st-cancel').onclick=()=>openCard(id);
+    $('c-st-do').onclick=()=>{const r=$('c-reason').value.trim();if(!r){toast('Укажите причину сторно.');return;}x.status='storno';x.reason=r;save();toast('Закупка №'+pad3(x.no)+' сторнирована');openCard(id);};
+  };
+  show('card');
+}
+
+/* ADVANCE */
+function openAdv(){
+  $('a-amount').value='';$('a-by').value='Бухгалтерия';$('a-date').value=nowLocal().slice(0,10);
+  chips($('a-method'),'am',[['cash','Наличные'],['transfer','Перевод на карту']],'cash');
+  show('adv');
+}
+$('a-save').onclick=()=>{
+  const a=parseMoney($('a-amount').value);
+  if(a<=0){toast('Введите сумму аванса.');$('a-amount').focus();return;}
+  S.advances.push({id:'a'+Date.now(),period:period().id,date:$('a-date').value||nowLocal().slice(0,10),amount:a,method:radioVal('am'),by:$('a-by').value.trim()||'—'});
+  save();toast('Выдача '+money(a)+' сом добавлена');show('home');
+};
+
+/* REPORT */
+function renderReport(){
+  const p=period(),T=totals(p),closed=p.status==='closed';
+  $('r-status').textContent=closed?'Закрыт':'Открыт';
+  $('r-sub').textContent=p.number+' · '+dFull(p.opened)+' — '+(closed?dFull(p.closed):'по сегодня')+' · '+S.user.name;
+  $('r-sum').innerHTML=
+    '<div><span>Выдано авансом</span><span class="v">'+money(T.inn)+'</span></div>'+
+    '<div><span>Израсходовано ('+T.count+' закупок)</span><span class="v">'+money(T.out)+'</span></div>'+
+    '<div><span class="muted">в т.ч. без документов</span><span class="v" style="color:var(--warn)">'+money(T.nodoc)+'</span></div>'+
+    '<div><span class="muted">Сторно, не учитывается</span><span class="v muted">'+money(T.storno)+'</span></div>'+
+    '<div><span>Возвращено в кассу</span><span class="v">'+money(T.ret)+'</span></div>'+
+    '<div class="total"><span>'+(T.bal<0?'Перерасход':'Остаток')+'</span><span class="v" style="'+(T.bal<0?'color:var(--bad)':'')+'">'+money(Math.abs(T.bal))+' сом</span></div>';
+  const by={};purchasesOf(p).filter(x=>x.status==='active').forEach(x=>by[x.pur]=(by[x.pur]||0)+x.amount);
+  const rows=Object.entries(by).sort((a,b)=>b[1]-a[1]),max=rows.length?rows[0][1]:1;
+  $('r-bars').innerHTML=rows.length?rows.map(([k,v])=>'<div><div class="bar-h"><span>'+esc(pur(k))+'</span><span class="v">'+money(v)+' сом · '+Math.round(v/T.out*100)+'%</span></div><div class="bar"><i style="width:'+(v/max*100)+'%"></i></div></div>').join(''):'<div class="muted">Закупок пока нет.</div>';
+  const list=purchasesOf(p).slice().sort((a,b)=>a.no-b.no);
+  $('r-table').innerHTML='<thead><tr><th>№</th><th>Дата</th><th>Поставщик</th><th>Назначение</th><th>Документ</th><th>Оплата</th><th class="r">Сумма</th></tr></thead><tbody>'+
+    list.map(x=>'<tr'+(x.status==='storno'?' class="struck"':'')+'><td class="num">'+pad3(x.no)+'</td><td class="tnum">'+dShort(x.dt)+'</td><td>'+esc(sup(x.sup))+'</td><td>'+esc(pur(x.pur))+'</td><td>'+DOC[x.doc]+'</td><td>'+PAY[x.pay]+'</td><td class="r">'+money(x.amount)+'</td></tr>').join('')+
+    '</tbody><tfoot><tr><td colspan="6">Итого без сторно</td><td class="r">'+money(T.out)+'</td></tr></tfoot>';
+  $('r-close').hidden=closed;
+}
+const exportMsg=f=>()=>toast(f+': в установленной версии файл формируется и сохраняется через «Поделиться». В превью скачивание отключено.');
+$('r-xlsx').onclick=exportMsg('Excel');$('r-pdf').onclick=exportMsg('PDF');
+$('r-close').onclick=()=>{
+  const p=period(),T=totals(p),docs=purchasesOf(p).filter(x=>x.status==='active'&&x.doc!=='none').length;
+  $('cl-sum').innerHTML='<div><span>Выдано</span><span class="v">'+money(T.inn)+'</span></div><div><span>Израсходовано</span><span class="v">'+money(T.out)+'</span></div><div class="total"><span>'+(T.bal<0?'Перерасход':'Остаток на руках')+'</span><span class="v">'+money(Math.abs(T.bal))+' сом</span></div>';
+  $('cl-ret').value=T.bal>0?money(T.bal).replace(/\s/g,' '):'0';
+  $('cl-note').innerHTML=T.bal<0?'<div class="note bad"><span>Перерасход <b class="num">'+money(-T.bal)+' сом</b> будет зафиксирован в отчёте.</span></div>':'';
+  $('cl-check-l').textContent='Бумажные документы ('+docs+' шт.) сданы в бухгалтерию';
+  $('cl-check').checked=false;$('cl-do').disabled=true;
+  show('close');
+};
+$('cl-check').onchange=e=>$('cl-do').disabled=!e.target.checked;
+$('cl-do').onclick=()=>{
+  const p=period(),T=totals(p),r=parseMoney($('cl-ret').value);
+  if(r<0||r>Math.max(T.bal,0)){toast('Возврат не может превышать остаток.');return;}
+  p.ret=r;p.status='closed';p.closed=nowLocal().slice(0,10);save();
+  toast('Период '+p.number+' закрыт');show('home');
+};
+function newPeriod(){
+  const last=period(),n=parseInt(last.number.split('-')[2],10)+1,id='P'+Date.now();
+  S.periods.push({id,number:'П-'+new Date().getFullYear()+'-'+String(n).padStart(2,'0'),opened:nowLocal().slice(0,10),closed:null,status:'open',ret:0});
+  save();toast('Открыт новый период. Добавьте выдачу аванса.');renderHome();
+}
+
+/* MORE */
+function renderMore(){
+  $('s-name').value=S.user.name;$('s-org').value=S.user.org;
+  $('s-sup-n').textContent=S.suppliers.length;
+  $('s-sup').innerHTML=S.suppliers.map(s=>{const n=S.purchases.filter(x=>x.sup===s.id&&x.status==='active');return '<div class="item" style="cursor:default;grid-template-columns:1fr auto"><span class="t">'+esc(s.name)+'</span><span class="s tnum">'+n.length+' закуп. · '+money(n.reduce((a,x)=>a+x.amount,0))+'</span></div>';}).join('');
+  $('s-pur').innerHTML=S.purposes.map(p=>'<div class="item" style="cursor:default;grid-template-columns:1fr"><span class="t">'+esc(p.name)+'</span></div>').join('');
+  const days=Math.floor((Date.now()-new Date(S.lastBackup+'T00:00').getTime())/864e5);
+  $('s-backup-note').innerHTML='<span>Данные хранятся только на телефоне. Последняя копия: <b>'+dFull(S.lastBackup)+'</b> ('+days+' дн. назад).</span>';
+  $('s-reset').textContent='Сбросить демо-данные';$('s-reset').dataset.armed='';
+}
+$('s-name').onchange=e=>{S.user.name=e.target.value.trim()||S.user.name;save();};
+$('s-org').onchange=e=>{S.user.org=e.target.value.trim()||S.user.org;save();};
+$('s-addpur').onclick=()=>{const v=$('s-newpur').value.trim();if(!v)return;S.purposes.push({id:'p'+Date.now(),name:v});$('s-newpur').value='';save();renderMore();toast('Назначение добавлено');};
+$('s-backup').onclick=()=>{S.lastBackup=nowLocal().slice(0,10);save();renderMore();toast('В рабочей версии здесь создаётся zip-файл и открывается «Поделиться» (Файлы, iCloud Drive, Telegram).');};
+$('s-reset').onclick=e=>{const b=e.currentTarget;if(!b.dataset.armed){b.dataset.armed='1';b.textContent='Нажмите ещё раз для сброса';return;}S=seed();save();toast('Демо-данные восстановлены');show('home');};
+
+show('home');
+})();
+</script>
+
+</body>
+</html>

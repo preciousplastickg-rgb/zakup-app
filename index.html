@@ -1,0 +1,443 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Подотчёт закупщика</title>
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-180.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Подотчёт">
+<meta name="format-detection" content="telephone=no">
+<meta name="theme-color" media="(prefers-color-scheme: light)" content="#EDF0F3">
+<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0F151B">
+<style>
+@font-face{font-family:"IBM Plex Sans";font-weight:400;font-display:swap;src:url(vendor/fonts/IBMPlexSans-Regular.woff2) format("woff2")}
+@font-face{font-family:"IBM Plex Sans";font-weight:500;font-display:swap;src:url(vendor/fonts/IBMPlexSans-Medium.woff2) format("woff2")}
+@font-face{font-family:"IBM Plex Sans";font-weight:600;font-display:swap;src:url(vendor/fonts/IBMPlexSans-SemiBold.woff2) format("woff2")}
+@font-face{font-family:"IBM Plex Sans Condensed";font-weight:600;font-display:swap;src:url(vendor/fonts/IBMPlexSansCondensed-SemiBold.woff2) format("woff2")}
+@font-face{font-family:"IBM Plex Sans Condensed";font-weight:700;font-display:swap;src:url(vendor/fonts/IBMPlexSansCondensed-Bold.woff2) format("woff2")}
+@font-face{font-family:"IBM Plex Mono";font-weight:500;font-display:swap;src:url(vendor/fonts/IBMPlexMono-Medium.woff2) format("woff2")}
+
+/* Layout: one phone column, steel "plate" with the balance on top, ledger list below */
+:root{
+  padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom);
+  --bg:#EDF0F3; --surface:#FFFFFF; --ink:#16202A; --muted:#5A6774; --line:#D4DAE0;
+  --accent:#1F5BD8; --accent-ink:#FFFFFF; --accent-soft:#E3EBFB;
+  --plate:#1B2A38; --plate-ink:#F2F5F8; --plate-muted:#A9B7C5;
+  --warn:#9A5B00; --warn-bg:#FFF2D6; --bad:#B8322A; --bad-bg:#FBE6E3; --good:#1D7448;
+  --f-display:"IBM Plex Sans Condensed","Arial Narrow",system-ui,sans-serif;
+  --f-body:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --f-mono:"IBM Plex Mono",ui-monospace,"SF Mono",Menlo,monospace;
+  --r:10px;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --bg:#0F151B; --surface:#18212A; --ink:#E5EAEF; --muted:#93A1AE; --line:#2B3743;
+  --accent:#6A97F7; --accent-ink:#0B1220; --accent-soft:#1D2B45;
+  --plate:#24323F; --plate-ink:#EEF2F6; --plate-muted:#9DADBC;
+  --warn:#F0B44C; --warn-bg:#3A2C10; --bad:#F07C70; --bad-bg:#3B1D1A; --good:#52C48C;
+  color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#0F151B; --surface:#18212A; --ink:#E5EAEF; --muted:#93A1AE; --line:#2B3743;
+  --accent:#6A97F7; --accent-ink:#0B1220; --accent-soft:#1D2B45;
+  --plate:#24323F; --plate-ink:#EEF2F6; --plate-muted:#9DADBC;
+  --warn:#F0B44C; --warn-bg:#3A2C10; --bad:#F07C70; --bad-bg:#3B1D1A; --good:#52C48C;
+  color-scheme:dark}
+[hidden]{display:none!important}
+img{max-width:100%}
+html{touch-action:manipulation;-webkit-text-size-adjust:100%}
+html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.45 var(--f-body);-webkit-tap-highlight-color:transparent}
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:10;background:var(--bg)}
+*{box-sizing:border-box}
+button,input,select,textarea{font:inherit;color:inherit}
+.app{max-width:460px;margin:0 auto;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));padding-block:12px 110px}
+.num{font-family:var(--f-mono);font-variant-numeric:tabular-nums}
+.tnum{font-variant-numeric:tabular-nums}
+h1,h2,h3{font-family:var(--f-display);margin:0;text-wrap:balance;letter-spacing:.01em}
+.label{font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);font-weight:600}
+.muted{color:var(--muted)}
+.hint{font-size:13px}
+.stack{display:flex;flex-direction:column;gap:12px}
+.row{display:flex;align-items:center;gap:10px}
+.spacer{flex:1}
+#h-notes:empty,#f-over:empty,#f-warn:empty,#f-goods-list:empty,#i-notes:empty,#r-notes:empty,#cl-notes:empty,#r-reopen:empty{display:none}
+.struck{text-decoration:line-through}
+
+/* top bar */
+.top{position:sticky;top:env(safe-area-inset-top,0px);z-index:5;background:var(--bg);display:flex;align-items:center;gap:8px;padding:6px 0 10px}
+.top h2{font-size:20px}
+.back{border:0;background:transparent;padding:8px 10px 8px 0;font-size:16px;color:var(--accent);font-weight:600;cursor:pointer;min-height:44px}
+.brand{display:flex;align-items:baseline;gap:8px;padding:6px 0 12px}
+.brand h1{font-size:22px}
+.brand .org{color:var(--muted);font-size:13px}
+
+/* plate */
+.plate{background:var(--plate);color:var(--plate-ink);border-radius:14px;padding:18px 18px 16px;position:relative;overflow:hidden}
+.plate::after{content:"";position:absolute;inset:0;pointer-events:none;opacity:.07;
+  background:repeating-linear-gradient(45deg,currentColor 0 2px,transparent 2px 9px),repeating-linear-gradient(-45deg,currentColor 0 2px,transparent 2px 9px);
+  -webkit-mask:linear-gradient(105deg,transparent 45%,#000 100%);mask:linear-gradient(105deg,transparent 45%,#000 100%)}
+.plate .label{color:var(--plate-muted)}
+.bal{font-family:var(--f-display);font-weight:700;font-size:44px;line-height:1.05;margin:6px 0 2px;font-variant-numeric:tabular-nums;letter-spacing:-.01em}
+.bal small{font-size:20px;font-weight:600;margin-left:4px;color:var(--plate-muted)}
+.bal.neg{color:#FF9C8F}
+/* rgba вместо color-mix: color-mix есть только с iOS 16.2 */
+.plate-meta{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:14px;padding-top:12px;border-top:1px solid rgba(242,245,248,.18)}
+.plate-meta div{display:flex;flex-direction:column;gap:2px}
+.plate-meta b{font-family:var(--f-mono);font-weight:500;font-size:15px;font-variant-numeric:tabular-nums}
+.pill{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;padding:3px 9px;border-radius:999px;background:rgba(242,245,248,.14)}
+
+/* buttons */
+.btn{appearance:none;border:1px solid var(--line);background:var(--surface);border-radius:var(--r);min-height:48px;padding:10px 16px;font-weight:600;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:8px}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+.btn.warnb{background:var(--warn);border-color:var(--warn);color:var(--surface)}
+.btn.danger{color:var(--bad);border-color:var(--bad)}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+.btn:focus-visible,.chip:focus-within,.tab:focus-visible,.back:focus-visible,.item:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.btn-row{display:grid;grid-template-columns:1.4fr 1fr;gap:10px}
+.btn.full{width:100%}
+
+/* banners */
+.note{border-radius:var(--r);padding:10px 12px;font-size:14px;display:flex;gap:10px;align-items:flex-start}
+.note.warn{background:var(--warn-bg);color:var(--warn)}
+.note.bad{background:var(--bad-bg);color:var(--bad)}
+.note.info{background:var(--accent-soft);color:var(--accent)}
+.note b{font-weight:600}
+
+/* list */
+.section-h{display:flex;align-items:baseline;justify-content:space-between;margin-top:6px}
+.section-h h3{font-size:17px}
+.list{background:var(--surface);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+.item{display:grid;grid-template-columns:52px 1fr auto;gap:10px;align-items:center;padding:12px 14px;border:0;border-top:1px solid var(--line);background:transparent;width:100%;text-align:left;cursor:pointer}
+.item:first-child{border-top:0}
+.item.static{cursor:default}
+.item .no{font-family:var(--f-mono);font-size:13px;color:var(--muted)}
+.item .body{min-width:0}
+.item .t{display:block;font-weight:600;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.item .s{display:block;font-size:13px;color:var(--muted);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.item .a{font-family:var(--f-mono);font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}
+.item .a.good{color:var(--good)}
+.item.storno .t,.item.storno .a{text-decoration:line-through;color:var(--muted)}
+.item.plain{grid-template-columns:1fr auto}
+.tag{display:inline-block;font-size:11px;font-weight:600;padding:1px 6px;border-radius:4px;margin-left:4px;vertical-align:1px}
+.tag.warn{background:var(--warn-bg);color:var(--warn)}
+.tag.bad{background:var(--bad-bg);color:var(--bad)}
+.tag.adv{background:var(--accent-soft);color:var(--accent)}
+.empty{padding:22px 16px;text-align:center;color:var(--muted)}
+
+/* form */
+.field{display:flex;flex-direction:column;gap:6px}
+.input{width:100%;min-height:48px;border:1px solid var(--line);background:var(--surface);border-radius:var(--r);padding:10px 12px;font-size:16px}
+.input:focus{outline:2px solid var(--accent);outline-offset:-1px;border-color:transparent}
+.input.big{font-family:var(--f-display);font-weight:700;font-size:30px;min-height:60px;font-variant-numeric:tabular-nums}
+input[type="date"].input{-webkit-appearance:none;appearance:none;text-align:left}
+.input[readonly]{background:var(--bg)}
+select.input{height:48px}
+.igrid select.input{height:44px}
+textarea.input{min-height:70px;resize:vertical}
+.chips{display:flex;flex-wrap:wrap;gap:8px}
+.chip{position:relative}
+.chip input{position:absolute;opacity:0;inset:0;margin:0;cursor:pointer}
+.chip span{display:inline-flex;align-items:center;min-height:44px;padding:8px 13px;border:1px solid var(--line);border-radius:999px;background:var(--surface);font-size:14px;font-weight:500}
+.chip input:checked + span{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+.chip.warnchip input:checked + span{background:var(--warn);border-color:var(--warn);color:var(--surface)}
+.photo{display:flex;align-items:center;gap:14px;border:1.5px dashed var(--line);border-radius:12px;padding:14px;background:var(--surface);cursor:pointer;min-height:84px}
+.photo-state{display:flex;align-items:center;gap:14px}
+.photo .ic{width:52px;height:52px;border-radius:10px;background:var(--accent-soft);color:var(--accent);display:grid;place-items:center;flex:none}
+.photo img{width:64px;height:64px;object-fit:cover;border-radius:8px;flex:none}
+.switch{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:48px;padding:12px 14px;background:var(--surface);border:1px solid var(--line);border-radius:var(--r);cursor:pointer}
+.switch input{width:46px;height:28px;appearance:none;-webkit-appearance:none;border-radius:99px;background:var(--line);position:relative;cursor:pointer;flex:none;margin:0;transition:background .15s}
+.switch input::after{content:"";position:absolute;top:3px;left:3px;width:22px;height:22px;border-radius:50%;background:var(--surface);transition:transform .15s;box-shadow:0 1px 2px rgba(0,0,0,.25)}
+.switch input:checked{background:var(--accent)}
+.switch input:checked::after{transform:translateX(18px)}
+.items{display:flex;flex-direction:column;gap:10px}
+.irow{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:10px;display:flex;flex-direction:column;gap:8px}
+.igrid{display:grid;grid-template-columns:1fr 1fr 1.3fr;gap:8px}
+.igrid .input,.irow .input{min-height:44px;font-size:16px;padding:8px 10px}
+.ifoot{display:flex;justify-content:space-between;align-items:center;font-size:14px}
+.linkbtn{border:0;background:none;color:var(--accent);font-weight:600;cursor:pointer;padding:6px 0;min-height:44px}
+.linkbtn.bad{color:var(--bad)}
+.items-total{display:flex;justify-content:space-between;align-items:baseline;gap:12px;font-weight:600}
+.items-total b{font-family:var(--f-mono);font-weight:500;font-size:17px}
+.peek summary{cursor:pointer;min-height:44px;display:flex;align-items:center;font-weight:600;color:var(--accent)}
+.thumbs{display:flex;flex-wrap:wrap;gap:8px}
+.thumb{position:relative;width:76px;height:76px}
+.thumb img{display:block;width:100%;height:100%;object-fit:cover;border-radius:8px}
+/* Кнопка 44 pt при маленьком видимом кружке */
+.thumb button{position:absolute;top:0;right:0;width:44px;height:44px;padding:4px;border:0;background:none;cursor:pointer;display:flex;justify-content:flex-end;align-items:flex-start}
+.thumb button span{width:22px;height:22px;border-radius:50%;background:var(--ink);color:var(--bg);display:grid;place-items:center;font-size:15px;line-height:1}
+/* Не display:none: iOS надёжнее открывает камеру по label у присутствующего в раскладке поля */
+.file-input{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none}
+.sticky-save{position:fixed;left:0;right:0;bottom:0;z-index:6;background:linear-gradient(to top,var(--bg) 70%,transparent);padding:16px max(16px,env(safe-area-inset-right,0px)) calc(12px + env(safe-area-inset-bottom,0px)) max(16px,env(safe-area-inset-left,0px))}
+.sticky-save .inner{max-width:428px;margin:0 auto}
+
+/* done */
+.done{text-align:center;padding:30px 0 10px;display:flex;flex-direction:column;align-items:center;gap:8px}
+.done h2{font-size:22px}
+.done p{margin:0}
+.bignum{font-family:var(--f-display);font-weight:700;font-size:96px;line-height:1;letter-spacing:.02em;font-variant-numeric:tabular-nums;border:3px solid var(--ink);border-radius:12px;padding:10px 22px 6px;margin:8px 0}
+.done-actions{margin-top:18px}
+
+/* card */
+.kv{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:4px 14px;margin:0}
+.kv div{display:flex;justify-content:space-between;gap:12px;padding:10px 0;border-top:1px solid var(--line)}
+.kv div:first-child{border-top:0}
+.kv dt{color:var(--muted);margin:0}
+.kv dd{margin:0;text-align:right;font-weight:500;min-width:0}
+.amount-hero{font-family:var(--f-display);font-weight:700;font-size:38px;font-variant-numeric:tabular-nums}
+.ph-none{display:flex;align-items:center;gap:10px;padding:14px;border:1px dashed var(--line);border-radius:12px;color:var(--muted);font-size:14px}
+.photo-full{width:100%;border-radius:12px;border:1px solid var(--line)}
+.scroll{overflow-x:auto;background:var(--surface);border:1px solid var(--line);border-radius:12px}
+table{border-collapse:collapse;width:100%;font-size:13.5px}
+th,td{padding:9px 10px;text-align:left;border-top:1px solid var(--line);white-space:nowrap}
+thead th{border-top:0;font-size:11.5px;letter-spacing:.05em;text-transform:uppercase;color:var(--muted);font-weight:600}
+td.r,th.r{text-align:right;font-family:var(--f-mono);font-variant-numeric:tabular-nums}
+th,td{padding-inline:5px}
+th:first-child,td:first-child{padding-left:10px}
+th:last-child,td:last-child{padding-right:10px}
+.items-table td:first-child{white-space:normal;min-width:80px}
+tr.struck td{text-decoration:line-through;color:var(--muted)}
+tfoot td{font-weight:600}
+
+/* report */
+.sum{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:4px 14px}
+.sum div{display:flex;justify-content:space-between;padding:10px 0;border-top:1px solid var(--line);gap:10px}
+.sum div:first-child{border-top:0}
+.sum .v{font-family:var(--f-mono);font-variant-numeric:tabular-nums;white-space:nowrap}
+.sum .total{font-weight:700}
+.sum .total .v{font-size:17px}
+.sum .v.warn{color:var(--warn)}
+.sum .v.bad{color:var(--bad)}
+.bars{display:flex;flex-direction:column;gap:12px;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px}
+.bar-h{display:flex;justify-content:space-between;font-size:14px;margin-bottom:5px;gap:10px}
+.bar-h .v{font-family:var(--f-mono);font-variant-numeric:tabular-nums;white-space:nowrap}
+.bar{height:10px;border-radius:5px;background:var(--bg);overflow:hidden}
+.bar i{display:block;height:100%;background:var(--accent);border-radius:5px}
+.export{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.ready{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(84px + env(safe-area-inset-bottom,0px));width:calc(100% - 32px);max-width:428px;z-index:21;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:12px;display:flex;flex-direction:column;gap:10px;box-shadow:0 6px 20px rgba(0,0,0,.25);font-size:14px}
+
+.log-row{padding:10px 14px;border-top:1px solid var(--line);font-size:14px}
+.log-row:first-child{border-top:0}
+.log-row .when{display:block;font-size:12.5px;color:var(--muted)}
+
+/* tab bar */
+.tabbar{position:fixed;left:0;right:0;bottom:0;z-index:6;background:var(--surface);border-top:1px solid var(--line);padding:6px max(16px,env(safe-area-inset-right,0px)) calc(6px + env(safe-area-inset-bottom,0px)) max(16px,env(safe-area-inset-left,0px))}
+.tabbar .inner{max-width:428px;margin:0 auto;display:grid;grid-template-columns:repeat(3,1fr)}
+.tab{border:0;background:none;display:flex;flex-direction:column;align-items:center;gap:2px;padding:6px 0;font-size:11.5px;font-weight:600;color:var(--muted);cursor:pointer;min-height:48px}
+.tab svg{width:22px;height:22px}
+.tab[aria-current="true"]{color:var(--accent)}
+
+.toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(84px + env(safe-area-inset-bottom,0px));background:var(--ink);color:var(--bg);padding:10px 16px;border-radius:10px;font-size:14px;z-index:20;max-width:calc(100% - 32px);box-shadow:0 6px 20px rgba(0,0,0,.25)}
+@media (prefers-reduced-motion: reduce){*{transition:none!important;animation:none!important}}
+</style>
+</head>
+<body>
+<div class="app">
+
+<!-- HOME -->
+<section id="v-home" class="stack" hidden>
+  <div class="brand"><h1>Подотчёт</h1><span class="org" id="h-org"></span><span class="spacer"></span><span class="label" id="h-date"></span></div>
+  <div class="plate">
+    <div class="row"><span class="label">Остаток аванса</span><span class="spacer"></span><span class="pill" id="h-period"></span></div>
+    <div class="bal" id="h-bal"></div>
+    <div class="plate-meta">
+      <div><span class="label">Выдано</span><b id="h-in"></b></div>
+      <div><span class="label">Израсходовано</span><b id="h-out"></b></div>
+    </div>
+  </div>
+  <button class="btn primary full" id="b-newp" type="button" hidden>Открыть новый период</button>
+  <div class="btn-row" id="h-actions">
+    <button class="btn primary" id="b-new" type="button"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>Закупка</button>
+    <button class="btn" id="b-adv" type="button">+ Выдача</button>
+  </div>
+  <div id="h-notes" class="stack"></div>
+  <div class="section-h"><h3>Операции периода</h3><span class="muted tnum" id="h-count"></span></div>
+  <div class="list" id="h-list"></div>
+</section>
+
+<!-- NEW PURCHASE -->
+<section id="v-new" class="stack" hidden>
+  <div class="top"><button class="back" type="button" id="f-back" data-go="home">‹ Назад</button><h2 id="n-title">Новая закупка</h2><span class="spacer"></span><span class="label num" id="n-no"></span></div>
+  <div id="f-receipt-block" class="stack">
+  <label class="photo" for="f-photo">
+    <span class="photo-state" id="f-photo-empty">
+      <span class="ic"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg></span>
+      <span><b>Сфотографировать чек</b><br><span class="muted hint">Резервная копия. Бумажный чек сдаётся в бухгалтерию.</span></span>
+    </span>
+    <span class="photo-state" id="f-photo-done" hidden>
+      <img id="f-photo-img" alt="Фото чека">
+      <span><b>Фото прикреплено</b><br><span class="muted hint">Нажмите, чтобы переснять</span></span>
+    </span>
+  </label>
+  <input class="file-input" type="file" id="f-photo" accept="image/*" capture="environment" tabindex="-1" aria-label="Фото чека">
+  </div>
+  <div class="field"><label class="label" for="f-amount">Сумма, сом</label>
+    <input class="input big" id="f-amount" inputmode="decimal" placeholder="0" autocomplete="off">
+    <span class="muted hint" id="f-amount-hint" hidden>Сумма считается по позициям. Изменить её можно через позиции.</span></div>
+  <div id="f-over"></div>
+  <div class="field"><label class="label" for="f-supplier">Поставщик</label>
+    <input class="input" id="f-supplier" list="dl-sup" placeholder="Начните вводить название" autocomplete="off">
+    <datalist id="dl-sup"></datalist></div>
+  <div class="field"><label class="label" for="f-place">Место</label>
+    <input class="input" id="f-place" placeholder="Рынок, ряд, контейнер" autocomplete="off"></div>
+  <div class="field"><span class="label">Назначение</span><div class="chips" id="f-purpose"></div></div>
+  <div class="field"><span class="label">Документ</span><div class="chips" id="f-doc"></div></div>
+  <div class="field"><span class="label">Оплата</span><div class="chips" id="f-pay"></div></div>
+  <div class="field" id="f-goods-field"><span class="label">Фото товара</span>
+    <div class="thumbs" id="f-goods-list"></div>
+    <label class="photo" for="f-goods">
+      <span class="ic"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg></span>
+      <span><b id="f-goods-title">Сфотографировать товар</b><br><span class="muted hint">Необязательно. Можно несколько снимков.</span></span>
+    </label>
+    <input class="file-input" type="file" id="f-goods" accept="image/*" capture="environment" tabindex="-1" aria-label="Фото товара"></div>
+  <div class="field"><label class="label" for="f-comment">Комментарий</label>
+    <textarea class="input" id="f-comment" placeholder="Что купили"></textarea></div>
+  <div id="f-warn" class="stack"></div>
+  <div class="sticky-save"><div class="inner"><button class="btn primary full" id="f-save" type="button">Сохранить закупку</button></div></div>
+</section>
+
+<!-- DONE -->
+<section id="v-done" hidden>
+  <div class="done">
+    <span class="label">Закупка сохранена</span>
+    <div class="bignum" id="d-no"></div>
+    <h2>Запишите этот номер на чеке</h2>
+    <p class="muted" id="d-sum"></p>
+  </div>
+  <div class="stack done-actions">
+    <button class="btn primary full" type="button" id="d-more">Ещё закупка</button>
+    <button class="btn full" type="button" data-go="home">На главную</button>
+  </div>
+</section>
+
+<!-- CARD -->
+<section id="v-card" class="stack" hidden>
+  <div class="top"><button class="back" type="button" data-go="home">‹ Назад</button><h2 id="c-title"></h2></div>
+  <div id="c-body" class="stack"></div>
+</section>
+
+<!-- ADVANCE -->
+<section id="v-adv" class="stack" hidden>
+  <div class="top"><button class="back" type="button" data-go="home">‹ Назад</button><h2>Выдача аванса</h2></div>
+  <div class="field"><label class="label" for="a-amount">Сумма, сом</label>
+    <input class="input big" id="a-amount" inputmode="decimal" placeholder="0" autocomplete="off"></div>
+  <div class="field"><span class="label">Способ</span><div class="chips" id="a-method"></div></div>
+  <div class="field"><label class="label" for="a-by">Кто выдал</label>
+    <input class="input" id="a-by" autocomplete="off"></div>
+  <div class="field"><label class="label" for="a-date">Дата</label>
+    <input class="input" id="a-date" type="date"></div>
+  <button class="btn primary full" type="button" id="a-save">Добавить выдачу</button>
+</section>
+
+<!-- ITEMS -->
+<section id="v-items" class="stack" hidden>
+  <div class="top"><button class="back" type="button" data-go="card">‹ Назад</button><h2>Позиции</h2><span class="spacer"></span><span class="label num" id="i-no"></span></div>
+  <details class="peek" id="i-receipt" open><summary>Фото чека</summary><img class="photo-full" id="i-receipt-img" alt="Фото чека"></details>
+  <div class="items" id="i-rows"></div>
+  <button class="linkbtn" type="button" id="i-add">+ Ещё позиция</button>
+  <div class="items-total"><span>Итого по позициям</span><b id="i-total"></b></div>
+  <div id="i-notes" class="stack"></div>
+  <div class="sticky-save"><div class="inner"><button class="btn primary full" id="i-save" type="button">Сохранить позиции</button></div></div>
+</section>
+
+<!-- REPORT -->
+<section id="v-report" class="stack" hidden>
+  <div class="brand"><h1>Авансовый отчёт</h1><span class="spacer"></span><span class="label" id="r-status"></span></div>
+  <div class="field" id="r-period-field"><label class="label" for="r-period">Период</label><select class="input" id="r-period"></select></div>
+  <p class="muted hint" id="r-sub"></p>
+  <div id="r-notes" class="stack"></div>
+  <div id="r-body" class="stack">
+    <div class="sum" id="r-sum"></div>
+    <div class="section-h"><h3>По назначениям</h3></div>
+    <div class="bars" id="r-bars"></div>
+    <div class="section-h"><h3>Реестр закупок</h3><span class="muted hint">листайте вбок →</span></div>
+    <div class="scroll"><table id="r-table"></table></div>
+    <div class="export">
+      <button class="btn" type="button" id="r-xlsx">Excel</button>
+      <button class="btn" type="button" id="r-pdf">PDF</button>
+    </div>
+    <button class="btn full" type="button" id="r-photos">Фото документов, PDF</button>
+    <button class="btn danger full" type="button" id="r-close">Закрыть период</button>
+    <div id="r-reopen" class="stack"></div>
+  </div>
+</section>
+
+<!-- CLOSE PERIOD -->
+<section id="v-close" class="stack" hidden>
+  <div class="top"><button class="back" type="button" data-go="report">‹ Отчёт</button><h2>Закрытие периода</h2></div>
+  <div class="sum" id="cl-sum"></div>
+  <div id="cl-notes" class="stack"></div>
+  <div class="field"><label class="label" for="cl-ret">Возврат остатка в кассу, сом</label>
+    <input class="input big" id="cl-ret" inputmode="decimal" autocomplete="off"></div>
+  <label class="switch" for="cl-check"><span id="cl-check-l"></span><input type="checkbox" id="cl-check"></label>
+  <button class="btn full" type="button" id="cl-backup">Сохранить бэкап</button>
+  <button class="btn danger full" type="button" id="cl-do" disabled>Закрыть период</button>
+  <p class="muted hint">После закрытия закупки периода нельзя изменить или сторнировать. Исправить можно только переоткрытием с причиной.</p>
+</section>
+
+<!-- MORE -->
+<section id="v-more" class="stack" hidden>
+  <div class="brand"><h1>Настройки</h1></div>
+  <div class="field"><label class="label" for="s-name">ФИО закупщика</label><input class="input" id="s-name" autocomplete="off"></div>
+  <div class="field"><label class="label" for="s-org">Организация</label><input class="input" id="s-org" autocomplete="off"></div>
+  <div class="section-h"><h3>Назначения</h3></div>
+  <div class="list" id="s-pur"></div>
+  <div class="field"><label class="label" for="s-newpur">Новое назначение</label>
+    <div class="row"><input class="input" id="s-newpur" placeholder="Например, Объект: Склад" autocomplete="off"><button class="btn" type="button" id="s-addpur">Добавить</button></div></div>
+  <div class="section-h"><h3>Поставщики</h3><span class="muted tnum" id="s-sup-n"></span></div>
+  <div class="list" id="s-sup"></div>
+  <div class="section-h"><h3>Бэкап</h3></div>
+  <p class="muted hint" id="s-backup-note"></p>
+  <button class="btn full" type="button" id="s-backup">Сохранить копию данных</button>
+  <label class="btn full" for="s-restore">Восстановить из копии</label>
+  <input class="file-input" type="file" id="s-restore" accept=".zip,application/zip" tabindex="-1" aria-label="Файл бэкапа">
+  <button class="btn full" type="button" id="s-log">Журнал изменений</button>
+</section>
+
+<!-- DICTIONARY ENTRY -->
+<section id="v-dict" class="stack" hidden>
+  <div class="top"><button class="back" type="button" data-go="more">‹ Настройки</button><h2 id="d-title"></h2></div>
+  <div class="field"><label class="label" for="d-name">Название</label><input class="input" id="d-name" autocomplete="off"></div>
+  <div id="d-sup-fields" class="stack">
+    <div class="field"><label class="label" for="d-place">Место</label><input class="input" id="d-place" placeholder="Рынок, ряд, контейнер" autocomplete="off"></div>
+    <div class="field"><label class="label" for="d-phone">Телефон</label><input class="input" id="d-phone" type="tel" autocomplete="off"></div>
+    <div class="field"><label class="label" for="d-comment">Комментарий</label><textarea class="input" id="d-comment"></textarea></div>
+  </div>
+  <label class="switch" for="d-hide"><span>В архиве, не предлагать при закупке</span><input type="checkbox" id="d-hide"></label>
+  <button class="btn primary full" type="button" id="d-save">Сохранить</button>
+</section>
+
+<!-- RESTORE -->
+<section id="v-restore" class="stack" hidden>
+  <div class="top"><button class="back" type="button" data-go="more">‹ Настройки</button><h2>Восстановление</h2></div>
+  <div class="note warn"><span>Все данные на телефоне будут заменены данными из копии. Объединения нет, отменить замену нельзя.</span></div>
+  <div class="sum" id="rs-sum"></div>
+  <button class="btn full" type="button" id="rs-backup">Сначала сохранить текущие данные</button>
+  <button class="btn danger full" type="button" id="rs-do">Заменить все данные</button>
+</section>
+
+<!-- LOG -->
+<section id="v-log" class="stack" hidden>
+  <div class="top"><button class="back" type="button" data-go="more">‹ Настройки</button><h2>Журнал изменений</h2></div>
+  <div class="list" id="l-list"></div>
+</section>
+
+</div>
+
+<nav class="tabbar" id="tabbar" hidden><div class="inner">
+  <button class="tab" type="button" data-go="home"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="18" height="13" rx="2"/><path d="M3 10h18M7 15h4"/></svg>Подотчёт</button>
+  <button class="tab" type="button" data-go="report"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h9l4 4v14H6z"/><path d="M14 3v5h5M9 13h7M9 17h7"/></svg>Отчёт</button>
+  <button class="tab" type="button" data-go="more"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h10"/></svg>Настройки</button>
+</div></nav>
+<div class="ready" id="ready" hidden><span id="ready-name"></span><button class="btn primary full" type="button" id="ready-send">Отправить файл</button></div>
+<div class="toast" id="toast" hidden></div>
+
+<script src="vendor/dexie.min.js"></script>
+<script src="db.js"></script>
+<script src="reports.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
