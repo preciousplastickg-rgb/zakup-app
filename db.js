@@ -16,8 +16,25 @@ db.version(1).stores({
   settings: '&key',
 });
 
+const BAZAARS = ['Дордой', 'Ош базар', 'Аламедин', 'Орто-Сай', 'Мадина', 'АЮ Гранд'];
+
+const seedBazaars = tx => tx.table('bazaars').bulkAdd(BAZAARS.map(name => ({ name, active: true })));
+
+// До версии 2 закупка была только товаром и без наименования: оно бралось из комментария.
+function migratePurchaseV2(purchase) {
+  purchase.type = 'goods';
+  purchase.goodsName = purchase.comment || '';
+}
+
+// Версия 2: тип закупки (товар или услуга), наименование и справочник базаров. Назначения убраны из приложения,
+// но таблица и purposeId остаются: на них ссылаются старые записи журнала.
+db.version(2).stores({ bazaars: '++id, &name' }).upgrade(async tx => {
+  await seedBazaars(tx);
+  await tx.table('purchases').toCollection().modify(migratePurchaseV2);
+});
+
 db.on('populate', tx => {
-  tx.table('purposes').bulkAdd(['Цех №2', 'Ремонт офиса', 'Производство'].map(name => ({ name, active: true })));
+  seedBazaars(tx);
   tx.table('settings').add({ key: 'org', value: 'Азия Сталь' });
 });
 
@@ -58,7 +75,6 @@ function nowLocal() {
 const purchaseCounterKey = year => `purchase-${year}`;
 
 class NameTakenError extends Error {}
-class LastPurposeError extends Error {}
 class PeriodOpenError extends Error {}
 class BackupError extends Error {}
 
@@ -73,7 +89,16 @@ const getOpenPeriod = () => db.periods.where('status').equals('open').first();
 const getCurrentPeriod = async () => (await getOpenPeriod()) || db.periods.toCollection().last();
 
 // Сторно обычно означает ошибку, поэтому значения по умолчанию из него не берутся.
+// Что куплено: позиции точнее наименования из формы, поэтому в списке и отчётах они важнее.
+const purchaseTitle = p => (p.items.length ? p.items.map(i => i.name).join(', ') : p.goodsName);
+
 const getLastPurchase = () => db.purchases.toCollection().reverse().filter(p => p.status === 'active').first();
+
+// Отдельно от последней закупки: у услуги базара нет, и он не должен сбрасываться.
+async function getLastPlace() {
+  const purchase = await db.purchases.toCollection().reverse().filter(p => p.status === 'active' && p.place).first();
+  return purchase ? purchase.place : '';
+}
 
 async function getSetting(key) {
   const row = await db.settings.get(key);
@@ -144,10 +169,13 @@ async function ensureOpenPeriod(date) {
   return period;
 }
 
-async function findOrCreateSupplier(name, place) {
+async function findOrCreateSupplier(name, place, phone) {
   const known = await db.suppliers.where('name').equalsIgnoreCase(name).first();
-  if (!known) return db.suppliers.add({ name, place, phone: '', comment: '', archived: false });
-  if (place && !known.place) await db.suppliers.update(known.id, { place });
+  if (!known) return db.suppliers.add({ name, place, phone, comment: '', archived: false });
+  const changes = {};
+  if (place && !known.place) changes.place = place;
+  if (phone) changes.phone = phone;
+  await applyChanges(db.suppliers, 'supplier', known, changes);
   return known.id;
 }
 
@@ -187,15 +215,15 @@ function addAdvance({ amount, method, by, date }) {
 
 // Фото сжимается до вызова: внутри транзакции нельзя ждать ничего, кроме самой базы.
 // photos: [{ kind: 'receipt' | 'goods', blob }].
-function savePurchase({ amount, supplierName, place, purposeId, docType, payment, comment }, photos) {
+function savePurchase({ type, goodsName, amount, supplierName, phone, place, docType, payment, comment }, photos) {
   const dt = nowLocal();
   const year = Number(dt.slice(0, 4));
-  return db.transaction('rw', db.purchases, db.counters, db.photos, db.suppliers, db.periods, async () => {
+  return db.transaction('rw', db.purchases, db.counters, db.photos, db.suppliers, db.periods, db.auditLog, async () => {
     const period = await ensureOpenPeriod(dt.slice(0, 10));
-    const supplierId = await findOrCreateSupplier(supplierName, place);
+    const supplierId = await findOrCreateSupplier(supplierName, place, phone);
     const no = await nextCounter(purchaseCounterKey(year));
     const id = await db.purchases.add({
-      year, no, periodId: period.id, dt, supplierId, place, purposeId, amount,
+      year, no, periodId: period.id, dt, type, goodsName, supplierId, place, amount,
       payment, docType, comment, items: [], status: 'active', stornoReason: null,
     });
     await db.photos.bulkAdd(photos.map(photo => ({ ...photo, purchaseId: id })));
@@ -203,11 +231,11 @@ function savePurchase({ amount, supplierName, place, purposeId, docType, payment
   });
 }
 
-function updatePurchase(id, { amount, supplierName, place, purposeId, docType, payment, comment }) {
+function updatePurchase(id, { type, goodsName, amount, supplierName, phone, place, docType, payment, comment }) {
   return db.transaction('rw', db.purchases, db.periods, db.suppliers, db.auditLog, async () => {
     const purchase = await getEditablePurchase(id);
-    const supplierId = await findOrCreateSupplier(supplierName, place);
-    const changes = { supplierId, place, purposeId, docType, payment, comment };
+    const supplierId = await findOrCreateSupplier(supplierName, place, phone);
+    const changes = { type, goodsName, supplierId, place, docType, payment, comment };
     // Сумма закупки с позициями считается только по ним.
     if (!purchase.items.length) changes.amount = amount;
     await applyChanges(db.purchases, 'purchase', purchase, changes);
@@ -238,21 +266,19 @@ function saveSupplier(id, changes) {
   });
 }
 
-function addPurpose(name) {
-  return db.transaction('rw', db.purposes, db.auditLog, async () => {
-    await assertNameFree(db.purposes, name);
-    const id = await db.purposes.add({ name, active: true });
-    await db.auditLog.add({ entity: 'purpose', entityId: id, field: 'name', before: null, after: name, at: nowLocal() });
+function addBazaar(name) {
+  return db.transaction('rw', db.bazaars, db.auditLog, async () => {
+    await assertNameFree(db.bazaars, name);
+    const id = await db.bazaars.add({ name, active: true });
+    await db.auditLog.add({ entity: 'bazaar', entityId: id, field: 'name', before: null, after: name, at: nowLocal() });
   });
 }
 
-function savePurpose(id, changes) {
-  return db.transaction('rw', db.purposes, db.auditLog, async () => {
-    await assertNameFree(db.purposes, changes.name, id);
-    const others = await db.purposes.filter(p => p.active && p.id !== id).count();
-    // Без действующих назначений форму закупки нечем заполнить.
-    if (!changes.active && !others) throw new LastPurposeError();
-    await applyChanges(db.purposes, 'purpose', await db.purposes.get(id), changes);
+// В закупках базар хранится названием, поэтому переименование не меняет уже сданные отчёты.
+function saveBazaar(id, changes) {
+  return db.transaction('rw', db.bazaars, db.auditLog, async () => {
+    await assertNameFree(db.bazaars, changes.name, id);
+    await applyChanges(db.bazaars, 'bazaar', await db.bazaars.get(id), changes);
   });
 }
 

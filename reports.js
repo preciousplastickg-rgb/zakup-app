@@ -24,24 +24,22 @@ function loadVendor(src) {
 }
 
 async function buildReport(period) {
-  const [summary, suppliers, purposes, userName, org] = await Promise.all([
+  const [summary, suppliers, userName, org] = await Promise.all([
     periodSummary(period),
     db.suppliers.toArray(),
-    db.purposes.toArray(),
     getSetting('userName'),
     getSetting('org'),
   ]);
-  const supplierName = new Map(suppliers.map(s => [s.id, s.name]));
-  const purposeName = new Map(purposes.map(p => [p.id, p.name]));
+  const supplierById = new Map(suppliers.map(s => [s.id, s]));
   const purchases = summary.purchases
     .slice()
     .sort((a, b) => a.id - b.id)
-    .map(p => ({ ...p, supplier: supplierName.get(p.supplierId), purpose: purposeName.get(p.purposeId) }));
+    .map(p => {
+      const supplier = supplierById.get(p.supplierId);
+      return { ...p, title: purchaseTitle(p), supplier: supplier.name, phone: supplier.phone };
+    });
   const active = purchases.filter(p => p.status === 'active');
   const storno = purchases.filter(p => p.status === 'storno');
-
-  const byPurpose = new Map();
-  active.forEach(p => byPurpose.set(p.purpose, (byPurpose.get(p.purpose) || 0) + p.amount));
 
   const end = period.closed || nowLocal().slice(0, 10);
   return {
@@ -54,14 +52,16 @@ async function buildReport(period) {
     storno,
     stornoSum: sumAmounts(storno),
     noDocList: active.filter(p => p.docType === 'none'),
+    services: sumAmounts(active.filter(p => p.type === 'service')),
     withoutItems: active.filter(p => !p.items.length),
     docsCount: active.filter(p => p.docType !== 'none').length,
-    byPurpose: [...byPurpose].map(([name, amount]) => ({ name, amount })).sort((a, b) => b.amount - a.amount),
     ret: period.ret,
     end,
     fileBase: `${period.number}_${period.opened}_${end}`,
   };
 }
+
+const reportTitle = p => (p.type === 'service' ? `Услуга: ${p.title}` : p.title);
 
 const balanceLabel = r => (r.balance < 0 ? 'Перерасход' : 'Остаток');
 
@@ -91,6 +91,7 @@ async function reportXlsx(r) {
     [],
     ['Выдано авансом', xlsMoney(r.issued)],
     ['Израсходовано', xlsMoney(r.spent)],
+    ['в т.ч. услуги', xlsMoney(r.services)],
     ['в т.ч. без документов', xlsMoney(r.noDoc)],
     ['Сторно, не учитывается', xlsMoney(r.stornoSum)],
     ['Возвращено в кассу', xlsMoney(r.ret)],
@@ -98,16 +99,13 @@ async function reportXlsx(r) {
     [],
     ['Выдачи'],
     ...r.advances.map(a => [`${dFull(a.date)}, ${ADV_METHOD[a.method]}, ${a.by}`, xlsMoney(a.amount)]),
-    [],
-    ['По назначениям'],
-    ...r.byPurpose.map(x => [x.name, xlsMoney(x.amount)]),
   ], [34, 40]);
 
   addSheet(wb, 'Реестр', [
-    ['№', 'Дата', 'Поставщик', 'Место', 'Назначение', 'Документ', 'Оплата', 'Сумма', 'Комментарий'],
-    ...r.active.map(p => [pad3(p.no), date(p), p.supplier, p.place, p.purpose, DOC[p.docType], PAY[p.payment], xlsMoney(p.amount), p.comment]),
-    ['Итого', '', '', '', '', '', '', xlsMoney(r.spent)],
-  ], [7, 11, 26, 24, 18, 15, 11, 14, 30]);
+    ['№', 'Дата', 'Тип', 'Товар / услуга', 'Поставщик', 'Телефон', 'Базар', 'Документ', 'Оплата', 'Сумма', 'Комментарий'],
+    ...r.active.map(p => [pad3(p.no), date(p), p.type === 'service' ? 'Услуга' : 'Товар', p.title, p.supplier, p.phone, p.place, DOC[p.docType], PAY[p.payment], xlsMoney(p.amount), p.comment]),
+    ['Итого', '', '', '', '', '', '', '', '', xlsMoney(r.spent)],
+  ], [7, 11, 8, 34, 26, 16, 16, 15, 11, 14, 30]);
 
   addSheet(wb, 'Позиции', [
     ['№ закупки', 'Дата', 'Поставщик', 'Наименование', 'Ед.', 'Кол-во', 'Цена', 'Сумма'],
@@ -197,7 +195,7 @@ function pdfFooter(doc, label) {
 function pdfRegistryRows(r) {
   const right = { halign: 'right' };
   return r.active.flatMap(p => {
-    const head = [pad3(p.no), dFull(p.dt), p.supplier, p.purpose, DOC[p.docType], PAY[p.payment], money(p.amount)]
+    const head = [pad3(p.no), dFull(p.dt), reportTitle(p), p.supplier, DOC[p.docType], PAY[p.payment], money(p.amount)]
       .map((content, i) => ({ content, styles: { fontStyle: 'bold', ...(i === 6 ? right : {}) } }));
     const rows = p.items.map(i => [
       '',
@@ -239,17 +237,11 @@ async function reportPdf(r) {
   y = pdfHeading(doc, y, 'Реестр закупок');
   y = pdfTable(doc, {
     startY: y,
-    head: [['№', 'Дата', 'Поставщик', 'Назначение', 'Документ', 'Оплата', { content: 'Сумма', styles: right }]],
+    head: [['№', 'Дата', 'Товар / услуга', 'Поставщик', 'Документ', 'Оплата', { content: 'Сумма', styles: right }]],
     body: pdfRegistryRows(r),
     foot: [[{ content: 'Итого без сторно', colSpan: 6 }, { content: money(r.spent), styles: right }]],
     showFoot: 'lastPage',
     columnStyles: { 0: { cellWidth: 10 }, 1: { cellWidth: 20 }, 4: { cellWidth: 26 }, 5: { cellWidth: 19 }, 6: { cellWidth: 24 } },
-  });
-
-  y = pdfHeading(doc, y, 'Итоги по назначениям');
-  y = pdfTable(doc, {
-    startY: y,
-    body: r.byPurpose.map(x => [x.name, { content: money(x.amount), styles: right }]),
   });
 
   if (r.noDocList.length) {
@@ -269,17 +261,18 @@ async function reportPdf(r) {
     y = pdfTable(doc, {
       startY: y,
       head: [['№', 'Дата', 'Поставщик', 'Причина', { content: 'Сумма', styles: right }]],
-      body: r.storno.map(p => [pad3(p.no), dFull(p.dt), p.supplier, p.stornoReason, { content: money(p.amount), styles: right }]),
+      body: r.storno.map(p => [pad3(p.no), dFull(p.dt), p.supplier, p.stornoReason || '', { content: money(p.amount), styles: right }]),
       columnStyles: { 0: { cellWidth: 10 }, 1: { cellWidth: 20 }, 4: { cellWidth: 24 } },
     });
   }
 
-  y = pdfHeading(doc, y, 'Расчёт', 44);
+  y = pdfHeading(doc, y, 'Расчёт', 50);
   y = pdfTable(doc, {
     startY: y,
     body: [
       ['Выдано авансом', { content: money(r.issued), styles: right }],
       ['Израсходовано', { content: money(r.spent), styles: right }],
+      ['в т.ч. услуги', { content: money(r.services), styles: right }],
       ['Возвращено в кассу', { content: money(r.ret), styles: right }],
       [{ content: balanceLabel(r), styles: { fontStyle: 'bold' } }, { content: `${money(Math.abs(r.balance))} сом`, styles: { ...right, fontStyle: 'bold' } }],
     ],
@@ -359,7 +352,7 @@ async function buildBackup() {
 }
 
 // Разбирает и проверяет файл целиком до того, как что-либо будет изменено.
-// Сейчас версия схемы одна. Появится вторая — старые копии нужно будет здесь же приводить к новой.
+// Копии старых версий схемы приводятся здесь к текущей.
 async function readBackup(file) {
   await loadVendor('vendor/jszip.min.js');
   let zip;
@@ -370,8 +363,12 @@ async function readBackup(file) {
   } catch {
     throw new BackupError('Это не файл бэкапа.');
   }
-  if (data.schemaVersion !== db.verno) throw new BackupError('Копия сделана другой версией приложения.');
+  if (!(data.schemaVersion >= 1 && data.schemaVersion <= db.verno)) throw new BackupError('Копия сделана другой версией приложения.');
   const { tables } = data;
+  if (tables && data.schemaVersion < 2 && Array.isArray(tables.purchases)) {
+    tables.purchases.forEach(migratePurchaseV2);
+    tables.bazaars = BAZAARS.map((name, i) => ({ id: i + 1, name, active: true }));
+  }
   if (!tables || db.tables.some(table => !Array.isArray(tables[table.name]))) throw new BackupError('Файл бэкапа неполный.');
 
   const photos = [];

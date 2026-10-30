@@ -4,7 +4,8 @@
 const DOC = { ekkm: 'Чек ЭККМ', tov: 'Товарный чек', nakl: 'Накладная', esf: 'ЭСФ', none: 'Без документа' };
 const PAY = { cash: 'Наличные', transfer: 'Перевод' };
 const ADV_METHOD = { cash: 'Наличные', transfer: 'Перевод на карту' };
-const UNITS = ['шт', 'м', 'п.м.', 'м²', 'м³', 'кг', 'т', 'л', 'уп.', 'лист', 'меш.', 'рулон'];
+const TYPES = { goods: 'Товар', service: 'Услуга' };
+const UNITS = ['шт', 'м', 'п.м.', 'м²', 'м³', 'кг', 'т', 'л', 'уп.', 'лист', 'меш.', 'рулон', 'рейс', 'час', 'услуга'];
 const VIEWS = ['home', 'new', 'done', 'card', 'adv', 'items', 'report', 'close', 'more', 'dict', 'restore', 'log'];
 const TABS = ['home', 'report', 'more'];
 const PHOTO_MAX_SIDE = 1600;
@@ -35,8 +36,11 @@ function toast(msg) {
 
 function chips(el, name, options, value, warnKey) {
   el.innerHTML = options.map(([k, label]) =>
-    `<label class="chip${k === warnKey ? ' warnchip' : ''}"><input type="radio" name="${name}" value="${esc(k)}"${k === value ? ' checked' : ''}><span>${esc(label)}</span></label>`
+    `<label class="chip${k === warnKey ? ' warnchip' : ''}"><input type="radio" name="${name}" value="${esc(k)}"><span>${esc(label)}</span></label>`
   ).join('');
+  // Только свойством: WebKit при перерисовке группы игнорирует атрибут checked и оставляет прежний выбор.
+  const radio = [...el.querySelectorAll('input')].find(r => r.value === value);
+  if (radio) radio.checked = true;
 }
 
 function show(view) {
@@ -73,7 +77,8 @@ function renderOperation({ kind, x }) {
   }
   const doc = x.docType === 'none' ? '<span class="tag warn">нет документа</span>' : DOC[x.docType];
   const storno = x.status === 'storno';
-  return `<button class="item${storno ? ' storno' : ''}" type="button" data-card="${x.id}"><span class="no">№${pad3(x.no)}<br>${dShort(x.dt)}</span><span class="body"><span class="t">${esc(x.supplierName)}</span><span class="s">${esc(x.purposeName)} · ${storno ? '<span class="tag bad">сторно</span>' : doc}</span></span><span class="a">−${money(x.amount)}</span></button>`;
+  const service = x.type === 'service' ? '<span class="tag adv">услуга</span> ' : '';
+  return `<button class="item${storno ? ' storno' : ''}" type="button" data-card="${x.id}"><span class="no">№${pad3(x.no)}<br>${dShort(x.dt)}</span><span class="body"><span class="t">${esc(purchaseTitle(x) || x.supplierName)}</span><span class="s">${service}${esc(x.supplierName)} · ${storno ? '<span class="tag bad">сторно</span>' : doc}</span></span><span class="a">−${money(x.amount)}</span></button>`;
 }
 
 async function renderHome() {
@@ -81,7 +86,6 @@ async function renderHome() {
   const closed = !!period && period.status === 'closed';
   const sum = await periodSummary(period);
   const suppliers = new Map((await db.suppliers.toArray()).map(s => [s.id, s.name]));
-  const purposes = new Map((await db.purposes.toArray()).map(p => [p.id, p.name]));
 
   $('h-org').textContent = await getSetting('org');
   $('h-date').textContent = dFull(nowLocal());
@@ -105,7 +109,7 @@ async function renderHome() {
   const operations = [
     ...sum.purchases.map(p => ({
       kind: 'purchase', at: p.dt,
-      x: { ...p, supplierName: suppliers.get(p.supplierId), purposeName: purposes.get(p.purposeId) },
+      x: { ...p, supplierName: suppliers.get(p.supplierId) },
     })),
     ...sum.advances.map(a => ({ kind: 'advance', at: a.date + 'T00:00', x: a })),
   ].sort((a, b) => b.at.localeCompare(a.at) || b.x.id - a.x.id);
@@ -133,6 +137,7 @@ $('h-list').addEventListener('click', e => {
 const form = {
   balance: 0,
   suppliers: [],
+  bazaars: [],
   editing: null,      // закупка в режиме правки, null для новой
   session: {},        // новая форма — новый объект: по нему отсекается фото, дожатое для прошлой формы
   receipt: null,
@@ -157,7 +162,8 @@ function renderGoods() {
   $('f-goods-list').innerHTML = form.goods.map((g, i) =>
     `<span class="thumb"><img src="${g.url}" alt="Фото товара ${i + 1}"><button type="button" data-del-goods="${i}" aria-label="Удалить фото товара ${i + 1}"><span>×</span></button></span>`
   ).join('');
-  $('f-goods-title').textContent = form.goods.length ? 'Добавить ещё фото' : 'Сфотографировать товар';
+  const empty = radioVal('type') === 'service' ? 'Сделать фото' : 'Сфотографировать товар';
+  $('f-goods-title').textContent = form.goods.length ? 'Добавить ещё фото' : empty;
 }
 
 function clearGoods() {
@@ -166,10 +172,31 @@ function clearGoods() {
   renderGoods();
 }
 
-function fillForm({ editing, no, balance, purposes, suppliers, purposeId, docType, payment }) {
+function renderPlaces(selected) {
+  const names = form.bazaars.map(b => b.name);
+  if (selected && !names.includes(selected)) names.push(selected);
+  chips($('f-place'), 'place', names.map(n => [n, n]), selected);
+}
+
+// Услуге (доставке, погрузке) базар обычно не нужен, а подставленный из прошлой закупки был бы ложным.
+function applyPurchaseType() {
+  const service = radioVal('type') === 'service';
+  $('f-name-label').textContent = service ? 'Наименование услуги' : 'Наименование товара';
+  $('f-name').placeholder = service ? 'Например, доставка портером' : 'Например, профлист С21';
+  $('f-goods-label').textContent = service ? 'Фото' : 'Фото товара';
+  $('f-supplier-label').textContent = service ? 'Исполнитель' : 'Поставщик';
+  $('f-phone-label').textContent = service ? 'Телефон исполнителя' : 'Телефон поставщика';
+  $('f-place-field').hidden = service;
+  renderGoods();
+}
+
+$('f-type').addEventListener('change', applyPurchaseType);
+
+function fillForm({ editing, no, balance, bazaars, suppliers, place, type, docType, payment }) {
   form.editing = editing;
   form.balance = balance;
   form.suppliers = suppliers.filter(s => !s.archived);
+  form.bazaars = bazaars.filter(b => b.active);
   form.session = {};
   form.receiptPick = null;
   form.photoJobs = [];
@@ -185,30 +212,34 @@ function fillForm({ editing, no, balance, purposes, suppliers, purposeId, docTyp
   const itemized = !!editing && editing.items.length > 0;
   $('f-amount').readOnly = itemized;
   $('f-amount-hint').hidden = !itemized;
-  ['f-amount', 'f-supplier', 'f-place', 'f-comment'].forEach(id => { $(id).value = ''; });
+  ['f-name', 'f-amount', 'f-supplier', 'f-phone', 'f-comment'].forEach(id => { $(id).value = ''; });
+  $('f-place-new').hidden = true;
+  $('f-place-add').hidden = false;
   $('dl-sup').innerHTML = form.suppliers.map(s => `<option value="${esc(s.name)}"></option>`).join('');
-  chips($('f-purpose'), 'purpose', purposes.map(p => [String(p.id), p.name]), String(purposeId));
+  renderPlaces(place);
+  chips($('f-type'), 'type', Object.entries(TYPES), type);
+  applyPurchaseType();
   chips($('f-doc'), 'doc', Object.entries(DOC), docType, 'none');
   chips($('f-pay'), 'pay', Object.entries(PAY), payment);
 }
 
 async function openNew() {
-  const [no, sum, last, purposes, suppliers] = await Promise.all([
+  const [no, sum, last, place, bazaars, suppliers] = await Promise.all([
     peekPurchaseNo(),
     getOpenPeriod().then(periodSummary),
     getLastPurchase(),
-    db.purposes.toArray(),
+    getLastPlace(),
+    db.bazaars.toArray(),
     db.suppliers.toArray(),
   ]);
-  const active = purposes.filter(p => p.active);
-  const lastPurpose = last && active.find(p => p.id === last.purposeId);
   fillForm({
     editing: null,
     no,
     balance: sum.balance,
-    purposes: active,
+    bazaars,
     suppliers,
-    purposeId: (lastPurpose || active[0]).id,
+    place,
+    type: 'goods',
     docType: last ? last.docType : 'ekkm',
     payment: last ? last.payment : 'cash',
   });
@@ -218,9 +249,9 @@ async function openNew() {
 
 async function openEdit(id) {
   const x = await db.purchases.get(id);
-  const [sum, purposes, suppliers, supplier] = await Promise.all([
+  const [sum, bazaars, suppliers, supplier] = await Promise.all([
     db.periods.get(x.periodId).then(periodSummary),
-    db.purposes.toArray(),
+    db.bazaars.toArray(),
     db.suppliers.toArray(),
     db.suppliers.get(x.supplierId),
   ]);
@@ -228,16 +259,17 @@ async function openEdit(id) {
     editing: x,
     no: x.no,
     balance: sum.balance + x.amount,
-    // Снятое с использования назначение остаётся в выборе у закупки, где оно уже стоит.
-    purposes: purposes.filter(p => p.active || p.id === x.purposeId),
+    bazaars,
     suppliers,
-    purposeId: x.purposeId,
+    place: x.place,
+    type: x.type,
     docType: x.docType,
     payment: x.payment,
   });
+  $('f-name').value = x.goodsName;
   $('f-amount').value = money(x.amount);
   $('f-supplier').value = supplier.name;
-  $('f-place').value = x.place;
+  $('f-phone').value = supplier.phone;
   $('f-comment').value = x.comment;
   updateOverspendNote();
   show('new');
@@ -310,12 +342,41 @@ function updateOverspendNote() {
 }
 $('f-amount').addEventListener('input', updateOverspendNote);
 
-// Место известного поставщика подставляется само: быстрый режим экономит нажатия.
+// Телефон и базар известного поставщика подставляются сами: быстрый режим экономит нажатия.
 $('f-supplier').addEventListener('input', e => {
   const name = e.target.value.trim().toLowerCase();
   const known = form.suppliers.find(s => s.name.toLowerCase() === name);
-  if (known && known.place && !$('f-place').value) $('f-place').value = known.place;
+  if (!known) return;
+  if (known.phone && !$('f-phone').value) $('f-phone').value = known.phone;
+  if (known.place) renderPlaces(known.place);
 });
+
+$('f-place-add').onclick = () => {
+  $('f-place-add').hidden = true;
+  $('f-place-new').hidden = false;
+  $('f-place-name').value = '';
+  $('f-place-name').focus();
+};
+
+$('f-place-save').onclick = async () => {
+  const name = $('f-place-name').value.trim();
+  if (!name) { $('f-place-name').focus(); return; }
+  const known = form.bazaars.find(b => b.name.toLowerCase() === name.toLowerCase());
+  if (known) {
+    renderPlaces(known.name);
+  } else {
+    try {
+      await addBazaar(name);
+    } catch (err) {
+      // Такой базар есть в архиве: для этой закупки он всё равно подходит.
+      if (!(err instanceof NameTakenError)) throw err;
+    }
+    form.bazaars = (await db.bazaars.toArray()).filter(b => b.active);
+    renderPlaces(name);
+  }
+  $('f-place-new').hidden = true;
+  $('f-place-add').hidden = false;
+};
 
 function resetNoDocConfirm() {
   form.noDocArmedAt = 0;
@@ -336,11 +397,15 @@ $('f-doc').addEventListener('change', resetNoDocConfirm);
 
 async function submitPurchase() {
   if (form.saving) return;
+  const goodsName = $('f-name').value.trim();
   const amount = parseMoney($('f-amount').value);
   const supplierName = $('f-supplier').value.trim();
   const docType = radioVal('doc');
+  const type = radioVal('type');
+  const service = type === 'service';
+  if (!goodsName) { toast(`Укажите наименование ${service ? 'услуги' : 'товара'}.`); $('f-name').focus(); return; }
+  if (!supplierName) { toast(`Укажите ${service ? 'исполнителя' : 'поставщика'}.`); $('f-supplier').focus(); return; }
   if (!amount) { toast('Введите сумму закупки.'); $('f-amount').focus(); return; }
-  if (!supplierName) { toast('Укажите поставщика.'); $('f-supplier').focus(); return; }
   if (docType === 'none' && !(form.editing && form.editing.docType === 'none')) {
     if (!form.noDocArmedAt) { armNoDocConfirm(); return; }
     // Двойной тап не должен сойти за осознанное второе нажатие.
@@ -348,10 +413,12 @@ async function submitPurchase() {
   }
 
   const data = {
+    type,
+    goodsName,
     amount,
     supplierName,
-    place: $('f-place').value.trim(),
-    purposeId: Number(radioVal('purpose')),
+    phone: $('f-phone').value.trim(),
+    place: service ? '' : radioVal('place') || '',
     docType,
     payment: radioVal('pay'),
     comment: $('f-comment').value.trim(),
@@ -395,7 +462,7 @@ $('d-more').onclick = () => openNew();
 /* Журнал */
 
 const AUDIT_FIELDS = {
-  amount: 'Сумма', supplierId: 'Поставщик', place: 'Место', purposeId: 'Назначение', docType: 'Документ',
+  type: 'Тип', goodsName: 'Наименование', amount: 'Сумма', supplierId: 'Поставщик', place: 'Базар', purposeId: 'Назначение', docType: 'Документ',
   payment: 'Оплата', comment: 'Комментарий', items: 'Позиции', status: 'Статус', stornoReason: 'Причина сторно',
   name: 'Название', phone: 'Телефон', archived: 'В архиве', active: 'Действует',
   ret: 'Возврат', closed: 'Дата закрытия', revision: 'Редакция', reopenReason: 'Причина переоткрытия',
@@ -403,11 +470,12 @@ const AUDIT_FIELDS = {
 const AUDIT_STATUS = { active: 'Активна', storno: 'Сторно', open: 'Открыт', closed: 'Закрыт' };
 
 async function auditContext() {
-  const [suppliers, purposes, purchases, periods] = await Promise.all([db.suppliers.toArray(), db.purposes.toArray(), db.purchases.toArray(), db.periods.toArray()]);
+  const [suppliers, purposes, bazaars, purchases, periods] = await Promise.all([db.suppliers.toArray(), db.purposes.toArray(), db.bazaars.toArray(), db.purchases.toArray(), db.periods.toArray()]);
   const names = list => new Map(list.map(x => [x.id, x.name]));
   return {
     suppliers: names(suppliers),
     purposes: names(purposes),
+    bazaars: names(bazaars),
     purchases: new Map(purchases.map(p => [p.id, p])),
     periods: new Map(periods.map(p => [p.id, p.number])),
   };
@@ -423,6 +491,7 @@ function auditValue(field, value, ctx) {
     case 'docType': return DOC[value];
     case 'payment': return PAY[value];
     case 'status': return AUDIT_STATUS[value];
+    case 'type': return TYPES[value];
     case 'archived': case 'active': return value ? 'да' : 'нет';
     case 'items': return value.length ? `${value.length} поз. на ${money(value.reduce((s, i) => s + i.sum, 0))} сом` : 'нет';
     default: return value;
@@ -433,6 +502,7 @@ function auditSubject(e, ctx) {
   if (e.entity === 'purchase') return `Закупка №${pad3(ctx.purchases.get(e.entityId).no)}`;
   if (e.entity === 'period') return `Период ${ctx.periods.get(e.entityId)}`;
   if (e.entity === 'supplier') return `Поставщик «${ctx.suppliers.get(e.entityId)}»`;
+  if (e.entity === 'bazaar') return `Базар «${ctx.bazaars.get(e.entityId)}»`;
   return `Назначение «${ctx.purposes.get(e.entityId)}»`;
 }
 
@@ -478,9 +548,8 @@ function renderItemsTable(x) {
 async function openCard(id) {
   cardId = id;
   const x = await db.purchases.get(id);
-  const [supplier, purpose, period, photos, history, ctx] = await Promise.all([
+  const [supplier, period, photos, history, ctx] = await Promise.all([
     db.suppliers.get(x.supplierId),
-    db.purposes.get(x.purposeId),
     db.periods.get(x.periodId),
     db.photos.where('purchaseId').equals(id).toArray(),
     db.auditLog.where('entityId').equals(id).filter(e => e.entity === 'purchase').toArray(),
@@ -492,6 +561,7 @@ async function openCard(id) {
   const goods = shots.filter(p => p.kind === 'goods');
   const storno = x.status === 'storno';
   const editable = !storno && period.status === 'open';
+  const service = x.type === 'service';
 
   const row = (dt, dd) => `<div><dt>${dt}</dt><dd>${dd}</dd></div>`;
   const badge = storno ? '<span class="tag bad">сторно</span>' : x.docType === 'none' ? '<span class="tag warn">нет документа</span>' : '';
@@ -501,9 +571,10 @@ async function openCard(id) {
     (storno ? `<div class="note bad"><span><b>Сторнирована.</b> ${esc(x.stornoReason)}</span></div>` : '') +
     '<dl class="kv">' +
     row('Дата', `<span class="tnum">${dFull(x.dt)}, ${x.dt.slice(11, 16)}</span>`) +
-    row('Поставщик', esc(supplier.name)) +
-    (x.place ? row('Место', esc(x.place)) : '') +
-    row('Назначение', esc(purpose.name)) +
+    (purchaseTitle(x) ? row(service ? 'Услуга' : 'Товар', esc(purchaseTitle(x))) : '') +
+    row(service ? 'Исполнитель' : 'Поставщик', esc(supplier.name)) +
+    (supplier.phone ? row('Телефон', esc(supplier.phone)) : '') +
+    (x.place ? row('Базар', esc(x.place)) : '') +
     row('Документ', DOC[x.docType]) +
     row('Оплата', PAY[x.payment]) +
     row('Период', esc(period.number)) +
@@ -517,7 +588,7 @@ async function openCard(id) {
       ? receipts.map(p => `<img class="photo-full" src="${p.url}" alt="Фото документа №${pad3(x.no)}">`).join('')
       : `<div class="ph-none"><span>Фото не прикреплено. Бумажный документ с номером <b class="num">№${pad3(x.no)}</b> в бухгалтерии.</span></div>`) +
     (goods.length
-      ? '<div class="section-h"><h3>Фото товара</h3></div>' + goods.map(p => `<img class="photo-full" src="${p.url}" alt="Фото товара №${pad3(x.no)}">`).join('')
+      ? `<div class="section-h"><h3>${service ? 'Фото' : 'Фото товара'}</h3></div>` + goods.map(p => `<img class="photo-full" src="${p.url}" alt="Фото товара №${pad3(x.no)}">`).join('')
       : '') +
     (history.length
       ? `<div class="section-h"><h3>История изменений</h3></div><div class="list">${history.map(e => renderAudit(e, ctx, false)).join('')}</div>`
@@ -533,15 +604,14 @@ async function openCard(id) {
 
 function openStorno(x) {
   $('c-storno').innerHTML =
-    '<div class="field"><label class="label" for="c-reason">Причина сторно</label><textarea class="input" id="c-reason" placeholder="Например, ошибка в сумме"></textarea></div>' +
+    '<div class="field"><label class="label" for="c-reason">Причина сторно</label><textarea class="input" id="c-reason" placeholder="Необязательно"></textarea></div>' +
     `<div class="btn-row"><button class="btn danger" type="button" id="c-st-do">Сторнировать №${pad3(x.no)}</button><button class="btn" type="button" id="c-st-cancel">Отмена</button></div>` +
     '<p class="muted hint">Номер не освобождается. Закупка останется в отчёте отдельным блоком и не войдёт в сумму.</p>';
   $('c-reason').focus();
   $('c-st-cancel').onclick = () => openCard(x.id);
   $('c-st-do').onclick = async () => {
     if (stornoSaving) return;
-    const reason = $('c-reason').value.trim();
-    if (!reason) { toast('Укажите причину сторно.'); $('c-reason').focus(); return; }
+    const reason = $('c-reason').value.trim() || null;
     stornoSaving = true;
     try {
       await stornoPurchase(x.id, reason);
@@ -574,7 +644,8 @@ async function openItems(id) {
   $('i-receipt').hidden = !receipt;
   $('i-receipt-img').src = receipt ? viewPhotoUrl(receipt.blob) : '';
   $('i-rows').innerHTML = '';
-  (purchase.items.length ? purchase.items : [null]).forEach(addItemRow);
+  const firstRow = { name: purchase.goodsName, unit: purchase.type === 'service' ? 'услуга' : 'шт' };
+  (purchase.items.length ? purchase.items : [firstRow]).forEach(addItemRow);
   resetItemsConfirm();
   updateItemsTotals();
   show('items');
@@ -589,9 +660,9 @@ function addItemRow(item) {
     '<input class="input i-qty" inputmode="decimal" placeholder="Кол-во" aria-label="Количество" autocomplete="off">' +
     '<input class="input i-price" inputmode="decimal" placeholder="Цена" aria-label="Цена" autocomplete="off"></div>' +
     '<div class="ifoot"><span class="muted">Сумма: <b class="num" data-sum>0</b> сом</span><button class="linkbtn bad" type="button" data-del>Удалить</button></div>';
-  if (item) {
-    row.querySelector('.i-name').value = item.name;
-    row.querySelector('.i-unit').value = item.unit;
+  if (item) row.querySelector('.i-name').value = item.name;
+  if (item && item.unit) row.querySelector('.i-unit').value = item.unit;
+  if (item && item.qty) {
     row.querySelector('.i-qty').value = String(item.qty).replace('.', ',');
     row.querySelector('.i-price').value = money(item.price);
   }
@@ -768,6 +839,7 @@ function renderReportSum(r) {
   const row = (label, value, cls = '') => `<div><span>${label}</span><span class="v ${cls}">${value}</span></div>`;
   return row('Выдано авансом', money(r.issued)) +
     row(`Израсходовано (${r.count} ${plural(r.count, 'закупка', 'закупки', 'закупок')})`, money(r.spent)) +
+    row('<span class="muted">в т.ч. услуги</span>', money(r.services)) +
     row('<span class="muted">в т.ч. без документов</span>', money(r.noDoc), 'warn') +
     row('<span class="muted">Сторно, не учитывается</span>', money(r.stornoSum), 'muted') +
     row('Возвращено в кассу', money(r.ret)) +
@@ -800,13 +872,9 @@ async function showReport(periodId) {
   $('r-notes').innerHTML = notes.join('');
 
   $('r-sum').innerHTML = renderReportSum(r);
-  const max = r.byPurpose.length ? r.byPurpose[0].amount : 1;
-  $('r-bars').innerHTML = r.byPurpose.length
-    ? r.byPurpose.map(x => `<div><div class="bar-h"><span>${esc(x.name)}</span><span class="v">${money(x.amount)} сом · ${Math.round(x.amount / r.spent * 100)}%</span></div><div class="bar"><i style="width:${x.amount / max * 100}%"></i></div></div>`).join('')
-    : '<div class="muted">Закупок пока нет.</div>';
   $('r-table').innerHTML =
-    '<thead><tr><th>№</th><th>Дата</th><th>Поставщик</th><th>Назначение</th><th>Документ</th><th>Оплата</th><th class="r">Сумма</th></tr></thead><tbody>' +
-    r.purchases.map(p => `<tr${p.status === 'storno' ? ' class="struck"' : ''}><td class="num">${pad3(p.no)}</td><td class="tnum">${dShort(p.dt)}</td><td>${esc(p.supplier)}</td><td>${esc(p.purpose)}</td><td>${DOC[p.docType]}</td><td>${PAY[p.payment]}</td><td class="r">${money(p.amount)}</td></tr>`).join('') +
+    '<thead><tr><th>№</th><th>Дата</th><th>Товар / услуга</th><th>Поставщик</th><th>Документ</th><th>Оплата</th><th class="r">Сумма</th></tr></thead><tbody>' +
+    r.purchases.map(p => `<tr${p.status === 'storno' ? ' class="struck"' : ''}><td class="num">${pad3(p.no)}</td><td class="tnum">${dShort(p.dt)}</td><td>${esc(reportTitle(p))}</td><td>${esc(p.supplier)}</td><td>${DOC[p.docType]}</td><td>${PAY[p.payment]}</td><td class="r">${money(p.amount)}</td></tr>`).join('') +
     `</tbody><tfoot><tr><td colspan="6">Итого без сторно</td><td class="r">${money(r.spent)}</td></tr></tfoot>`;
 
   $('r-close').hidden = closed;
@@ -920,12 +988,12 @@ $('cl-do').onclick = async () => {
 const dict = { kind: null, record: null, saving: false };
 
 async function showMore() {
-  const [userName, org, lastBackupAt, suppliers, purposes, purchases] = await Promise.all([
+  const [userName, org, lastBackupAt, suppliers, bazaars, purchases] = await Promise.all([
     getSetting('userName'),
     getSetting('org'),
     getSetting('lastBackupAt'),
     db.suppliers.toArray(),
-    db.purposes.toArray(),
+    db.bazaars.toArray(),
     db.purchases.where('status').equals('active').toArray(),
   ]);
   const byName = (a, b) => a.name.localeCompare(b.name, 'ru');
@@ -933,8 +1001,8 @@ async function showMore() {
   $('s-org').value = org || '';
   $('s-sup-n').textContent = suppliers.length;
   $('s-backup-note').textContent = `Данные хранятся только на этом телефоне. Последняя копия: ${lastBackupAt ? dFull(lastBackupAt) : 'ещё не делалась'}.`;
-  $('s-pur').innerHTML = purposes.sort(byName).map(p =>
-    `<button class="item plain" type="button" data-dict="purpose" data-id="${p.id}"><span class="t">${esc(p.name)}${p.active ? '' : '<span class="tag warn">архив</span>'}</span></button>`
+  $('s-baz').innerHTML = bazaars.sort(byName).map(b =>
+    `<button class="item plain" type="button" data-dict="bazaar" data-id="${b.id}"><span class="t">${esc(b.name)}${b.active ? '' : '<span class="tag warn">архив</span>'}</span></button>`
   ).join('');
   $('s-sup').innerHTML = suppliers.length
     ? suppliers.sort(byName).map(s => {
@@ -1021,31 +1089,30 @@ $('s-org').onchange = async e => {
 
 function dictError(err) {
   if (err instanceof NameTakenError) return 'Такое название уже есть.';
-  if (err instanceof LastPurposeError) return 'Нужно хотя бы одно действующее назначение.';
   console.error(err);
   return 'Не сохранилось. Попробуйте ещё раз.';
 }
 
-$('s-addpur').onclick = async () => {
-  const name = $('s-newpur').value.trim();
+$('s-addbaz').onclick = async () => {
+  const name = $('s-newbaz').value.trim();
   if (!name) return;
   try {
-    await addPurpose(name);
+    await addBazaar(name);
   } catch (err) {
     toast(dictError(err));
     return;
   }
-  $('s-newpur').value = '';
+  $('s-newbaz').value = '';
   await showMore();
-  toast('Назначение добавлено');
+  toast('Базар добавлен');
 };
 
 async function openDict(kind, id) {
   const supplier = kind === 'supplier';
-  const record = await (supplier ? db.suppliers : db.purposes).get(id);
+  const record = await (supplier ? db.suppliers : db.bazaars).get(id);
   dict.kind = kind;
   dict.record = record;
-  $('d-title').textContent = supplier ? 'Поставщик' : 'Назначение';
+  $('d-title').textContent = supplier ? 'Поставщик' : 'Базар';
   $('d-sup-fields').hidden = !supplier;
   $('d-name').value = record.name;
   $('d-place').value = record.place || '';
@@ -1055,7 +1122,7 @@ async function openDict(kind, id) {
   show('dict');
 }
 
-['s-pur', 's-sup'].forEach(id => $(id).addEventListener('click', e => {
+['s-baz', 's-sup'].forEach(id => $(id).addEventListener('click', e => {
   const b = e.target.closest('[data-dict]');
   if (b) openDict(b.dataset.dict, Number(b.dataset.id));
 }));
@@ -1076,7 +1143,7 @@ async function submitDict() {
         archived: hide,
       });
     } else {
-      await savePurpose(dict.record.id, { name, active: !hide });
+      await saveBazaar(dict.record.id, { name, active: !hide });
     }
   } catch (err) {
     toast(dictError(err));

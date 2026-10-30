@@ -211,11 +211,6 @@ tfoot td{font-weight:600}
 .sum .total .v{font-size:17px}
 .sum .v.warn{color:var(--warn)}
 .sum .v.bad{color:var(--bad)}
-.bars{display:flex;flex-direction:column;gap:12px;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px}
-.bar-h{display:flex;justify-content:space-between;font-size:14px;margin-bottom:5px;gap:10px}
-.bar-h .v{font-family:var(--f-mono);font-variant-numeric:tabular-nums;white-space:nowrap}
-.bar{height:10px;border-radius:5px;background:var(--bg);overflow:hidden}
-.bar i{display:block;height:100%;background:var(--accent);border-radius:5px}
 .export{display:grid;grid-template-columns:1fr 1fr;gap:10px}
 .ready{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(84px + env(safe-area-inset-bottom,0px));width:calc(100% - 32px);max-width:428px;z-index:21;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:12px;display:flex;flex-direction:column;gap:10px;box-shadow:0 6px 20px rgba(0,0,0,.25);font-size:14px}
 
@@ -261,7 +256,33 @@ tfoot td{font-weight:600}
 <!-- NEW PURCHASE -->
 <section id="v-new" class="stack" hidden>
   <div class="top"><button class="back" type="button" id="f-back" data-go="home">‹ Назад</button><h2 id="n-title">Новая закупка</h2><span class="spacer"></span><span class="label num" id="n-no"></span></div>
+  <div class="field"><span class="label">Что покупаем</span><div class="chips" id="f-type"></div></div>
+  <div class="field"><label class="label" for="f-name" id="f-name-label">Наименование товара</label>
+    <input class="input" id="f-name" placeholder="Например, профлист С21" autocomplete="off"></div>
+  <div class="field" id="f-goods-field"><span class="label" id="f-goods-label">Фото товара</span>
+    <div class="thumbs" id="f-goods-list"></div>
+    <label class="photo" for="f-goods">
+      <span class="ic"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg></span>
+      <span><b id="f-goods-title">Сфотографировать товар</b><br><span class="muted hint">Необязательно. Можно несколько снимков.</span></span>
+    </label>
+    <input class="file-input" type="file" id="f-goods" accept="image/*" capture="environment" tabindex="-1" aria-label="Фото товара"></div>
+  <div class="field"><label class="label" for="f-supplier" id="f-supplier-label">Поставщик</label>
+    <input class="input" id="f-supplier" list="dl-sup" placeholder="Начните вводить название" autocomplete="off">
+    <datalist id="dl-sup"></datalist></div>
+  <div class="field"><label class="label" for="f-phone" id="f-phone-label">Телефон поставщика</label>
+    <input class="input" id="f-phone" type="tel" inputmode="tel" placeholder="Необязательно" autocomplete="off"></div>
+  <div class="field" id="f-place-field"><span class="label">Базар</span>
+    <div class="chips" id="f-place"></div>
+    <div class="row" id="f-place-new" hidden><input class="input" id="f-place-name" placeholder="Название базара" aria-label="Название базара" autocomplete="off"><button class="btn" type="button" id="f-place-save">Добавить</button></div>
+    <button class="linkbtn" type="button" id="f-place-add">+ Добавить базар</button></div>
+  <div class="field"><label class="label" for="f-amount">Сумма, сом</label>
+    <input class="input big" id="f-amount" inputmode="decimal" placeholder="0" autocomplete="off">
+    <span class="muted hint" id="f-amount-hint" hidden>Сумма считается по позициям. Изменить её можно через позиции.</span></div>
+  <div id="f-over"></div>
+  <div class="field"><span class="label">Документ</span><div class="chips" id="f-doc"></div></div>
+  <div class="field"><span class="label">Оплата</span><div class="chips" id="f-pay"></div></div>
   <div id="f-receipt-block" class="stack">
+  <span class="label">Фото чека</span>
   <label class="photo" for="f-photo">
     <span class="photo-state" id="f-photo-empty">
       <span class="ic"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg></span>
@@ -274,27 +295,8 @@ tfoot td{font-weight:600}
   </label>
   <input class="file-input" type="file" id="f-photo" accept="image/*" capture="environment" tabindex="-1" aria-label="Фото чека">
   </div>
-  <div class="field"><label class="label" for="f-amount">Сумма, сом</label>
-    <input class="input big" id="f-amount" inputmode="decimal" placeholder="0" autocomplete="off">
-    <span class="muted hint" id="f-amount-hint" hidden>Сумма считается по позициям. Изменить её можно через позиции.</span></div>
-  <div id="f-over"></div>
-  <div class="field"><label class="label" for="f-supplier">Поставщик</label>
-    <input class="input" id="f-supplier" list="dl-sup" placeholder="Начните вводить название" autocomplete="off">
-    <datalist id="dl-sup"></datalist></div>
-  <div class="field"><label class="label" for="f-place">Место</label>
-    <input class="input" id="f-place" placeholder="Рынок, ряд, контейнер" autocomplete="off"></div>
-  <div class="field"><span class="label">Назначение</span><div class="chips" id="f-purpose"></div></div>
-  <div class="field"><span class="label">Документ</span><div class="chips" id="f-doc"></div></div>
-  <div class="field"><span class="label">Оплата</span><div class="chips" id="f-pay"></div></div>
-  <div class="field" id="f-goods-field"><span class="label">Фото товара</span>
-    <div class="thumbs" id="f-goods-list"></div>
-    <label class="photo" for="f-goods">
-      <span class="ic"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg></span>
-      <span><b id="f-goods-title">Сфотографировать товар</b><br><span class="muted hint">Необязательно. Можно несколько снимков.</span></span>
-    </label>
-    <input class="file-input" type="file" id="f-goods" accept="image/*" capture="environment" tabindex="-1" aria-label="Фото товара"></div>
   <div class="field"><label class="label" for="f-comment">Комментарий</label>
-    <textarea class="input" id="f-comment" placeholder="Что купили"></textarea></div>
+    <textarea class="input" id="f-comment" placeholder="Необязательно"></textarea></div>
   <div id="f-warn" class="stack"></div>
   <div class="sticky-save"><div class="inner"><button class="btn primary full" id="f-save" type="button">Сохранить закупку</button></div></div>
 </section>
@@ -351,8 +353,6 @@ tfoot td{font-weight:600}
   <div id="r-notes" class="stack"></div>
   <div id="r-body" class="stack">
     <div class="sum" id="r-sum"></div>
-    <div class="section-h"><h3>По назначениям</h3></div>
-    <div class="bars" id="r-bars"></div>
     <div class="section-h"><h3>Реестр закупок</h3><span class="muted hint">листайте вбок →</span></div>
     <div class="scroll"><table id="r-table"></table></div>
     <div class="export">
@@ -383,10 +383,10 @@ tfoot td{font-weight:600}
   <div class="brand"><h1>Настройки</h1></div>
   <div class="field"><label class="label" for="s-name">ФИО закупщика</label><input class="input" id="s-name" autocomplete="off"></div>
   <div class="field"><label class="label" for="s-org">Организация</label><input class="input" id="s-org" autocomplete="off"></div>
-  <div class="section-h"><h3>Назначения</h3></div>
-  <div class="list" id="s-pur"></div>
-  <div class="field"><label class="label" for="s-newpur">Новое назначение</label>
-    <div class="row"><input class="input" id="s-newpur" placeholder="Например, Объект: Склад" autocomplete="off"><button class="btn" type="button" id="s-addpur">Добавить</button></div></div>
+  <div class="section-h"><h3>Базары</h3></div>
+  <div class="list" id="s-baz"></div>
+  <div class="field"><label class="label" for="s-newbaz">Новый базар</label>
+    <div class="row"><input class="input" id="s-newbaz" placeholder="Название базара" autocomplete="off"><button class="btn" type="button" id="s-addbaz">Добавить</button></div></div>
   <div class="section-h"><h3>Поставщики</h3><span class="muted tnum" id="s-sup-n"></span></div>
   <div class="list" id="s-sup"></div>
   <div class="section-h"><h3>Бэкап</h3></div>
@@ -402,7 +402,7 @@ tfoot td{font-weight:600}
   <div class="top"><button class="back" type="button" data-go="more">‹ Настройки</button><h2 id="d-title"></h2></div>
   <div class="field"><label class="label" for="d-name">Название</label><input class="input" id="d-name" autocomplete="off"></div>
   <div id="d-sup-fields" class="stack">
-    <div class="field"><label class="label" for="d-place">Место</label><input class="input" id="d-place" placeholder="Рынок, ряд, контейнер" autocomplete="off"></div>
+    <div class="field"><label class="label" for="d-place">Базар</label><input class="input" id="d-place" autocomplete="off"></div>
     <div class="field"><label class="label" for="d-phone">Телефон</label><input class="input" id="d-phone" type="tel" autocomplete="off"></div>
     <div class="field"><label class="label" for="d-comment">Комментарий</label><textarea class="input" id="d-comment"></textarea></div>
   </div>
