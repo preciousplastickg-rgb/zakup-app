@@ -1630,7 +1630,9 @@ async function showReport(periodId) {
 
   const r = report = await buildReport(period);
   const closed = period.status === 'closed';
-  $('r-period').innerHTML = periods.slice().reverse().map(p => `<option value="${p.id}"${p.id === period.id ? ' selected' : ''}>${esc(p.number)}</option>`).join('');
+  // После загрузки архива номер периода может повториться: тогда различаем по датам.
+  const repeated = number => periods.filter(p => p.number === number).length > 1;
+  $('r-period').innerHTML = periods.slice().reverse().map(p => `<option value="${p.id}"${p.id === period.id ? ' selected' : ''}>${esc(p.number)}${repeated(p.number) ? `, с ${dFull(p.opened)}` : ''}</option>`).join('');
   $('r-status').textContent = (closed ? 'Закрыт' : 'Открыт') + (period.revision ? ` · редакция ${period.revision}` : '');
   $('r-sub').textContent = `${period.number} · ${dFull(period.opened)} — ${closed ? dFull(period.closed) : 'по сегодня'}${r.userName ? ' · ' + r.userName : ''}`;
 
@@ -1943,6 +1945,10 @@ $('s-unarchive').addEventListener('change', async e => {
   $('ua-sum').innerHTML = row('Архив от', esc(dFull(exportedAt))) +
     row('Периоды', esc(tables.periods.map(p => p.number).join(', '))) +
     row('Закупки', tables.purchases.length) + row('Фото', tables.photos.length);
+  const overlaps = await countNumberOverlaps(tables.purchases);
+  $('ua-note').innerHTML = overlaps
+    ? `<div class="note warn"><span>Совпадают номера: ${overlaps} ${plural(overlaps, 'закупка', 'закупки', 'закупок')}. Архивные сохранят свои номера с чеков, отличить их можно по дате и периоду. Новые номера пойдут дальше.</span></div>`
+    : '';
   $('ua-do').disabled = false;
   show('unarchive');
 });

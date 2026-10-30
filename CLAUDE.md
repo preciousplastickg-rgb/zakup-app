@@ -60,7 +60,7 @@
 ```
 periods:    ++id, number, status            // opened, closed, ret, revision
 advances:   ++id, periodId, date            // amount, method(cash|transfer), by, comment
-purchases:  ++id, &[year+no], periodId, dt, supplierId, purposeId, status
+purchases:  ++id, &[periodId+year+no], periodId, dt, supplierId, purposeId, status
             // year, no, type(goods|service), goodsName, place, amount, payment(cash|transfer), docType, comment, items[], stornoReason
 photos:     ++id, purchaseId                // blob, kind(receipt|goods)
 suppliers:  ++id, &name                     // place, phone, comment, archived
@@ -71,7 +71,7 @@ auditLog:   ++id, entity, entityId, at      // field, before, after
 settings:   &key                            // userName, org, lastBackupAt
 ```
 
-Нумерация обнуляется в январе, поэтому номер уникален в пределах года: `&[year+no]`.
+Нумерация обнуляется в январе. Номер уникален внутри периода (`&[periodId+year+no]`, схема 3), потому что архив может вернуть закупку с уже занятым номером. Новые номера выдаёт счётчик года.
 
 ## Отчёты
 
@@ -92,7 +92,7 @@ settings:   &key                            // userName, org, lastBackupAt
 ## Архив
 
 - Закрытые периоды сжимаются в `archive_YYYY-MM-DD.zip` (`data.json` с `kind: 'archive'`, фото 1100 px, JPEG 0.5) и отдаются через «Поделиться». Убрать их из приложения можно только после создания, проверки и передачи файла.
-- Загрузка архива добавляет записи к текущим с новыми id и отказывает, если период или номер уже заняты. Счётчики при архивации не меняются.
+- Загрузка архива добавляет записи к текущим с новыми id. Закупки сохраняют номера с чеков, даже если такие номера уже есть: перед загрузкой показывается предупреждение, новые номера идут дальше максимального. Отказ только при повторной загрузке того же периода (совпали номер и даты). Счётчики при архивации не уменьшаются.
 
 ## Этапы
 

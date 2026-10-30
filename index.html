@@ -67,7 +67,7 @@ h1,h2,h3{font-family:var(--f-display);margin:0;text-wrap:balance;letter-spacing:
 .stack{display:flex;flex-direction:column;gap:12px}
 .row{display:flex;align-items:center;gap:10px}
 .spacer{flex:1}
-#f-photo-list:empty,#ar-note:empty,#q-list:empty,#h-notes:empty,#f-over:empty,#f-warn:empty,#f-goods-list:empty,#i-notes:empty,#r-notes:empty,#cl-notes:empty,#cl-left:empty,#r-reopen:empty{display:none}
+#ua-note:empty,#f-photo-list:empty,#ar-note:empty,#q-list:empty,#h-notes:empty,#f-over:empty,#f-warn:empty,#f-goods-list:empty,#i-notes:empty,#r-notes:empty,#cl-notes:empty,#cl-left:empty,#r-reopen:empty{display:none}
 .struck{text-decoration:line-through}
 
 /* top bar */
@@ -519,6 +519,7 @@ tfoot td{font-weight:600}
   <div class="top"><button class="back" type="button" data-go="more">‹ Настройки</button><h2>Загрузка архива</h2></div>
   <p class="muted hint">Записи из архива добавятся к текущим. Текущие записи не изменятся.</p>
   <div class="sum" id="ua-sum"></div>
+  <div id="ua-note" class="stack"></div>
   <button class="btn primary full" type="button" id="ua-do">Загрузить в приложение</button>
 </section>
 

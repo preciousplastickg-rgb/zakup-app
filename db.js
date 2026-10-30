@@ -33,6 +33,10 @@ db.version(2).stores({ bazaars: '++id, &name' }).upgrade(async tx => {
   await tx.table('purchases').toCollection().modify(migratePurchaseV2);
 });
 
+// Версия 3: номер уникален внутри периода, а не во всём году. Закупка из архива сохраняет номер,
+// написанный на чеке, даже если такой уже выдан заново, например после удаления всех записей.
+db.version(3).stores({ purchases: '++id, &[periodId+year+no], periodId, dt, supplierId, purposeId, status' });
+
 db.on('populate', tx => {
   seedBazaars(tx);
   tx.table('settings').add({ key: 'org', value: 'Азия Сталь' });
@@ -347,16 +351,25 @@ function removeArchivedPeriods(periodIds, label) {
   });
 }
 
+async function raiseCounter(key, value) {
+  const row = await db.counters.get(key);
+  if (!row || row.value < value) await db.counters.put({ key, value });
+}
+
+// Сколько закупок архива получат номер, уже занятый в приложении: об этом предупреждаем до загрузки.
+async function countNumberOverlaps(purchases) {
+  const taken = new Set((await db.purchases.toArray()).map(p => `${p.year}-${p.no}`));
+  return purchases.filter(p => taken.has(`${p.year}-${p.no}`)).length;
+}
+
 // Архив добавляется к текущим данным с новыми id, поставщики сопоставляются по имени.
 function mergeArchive({ tables }, label) {
-  return db.transaction('rw', [db.periods, db.advances, db.purchases, db.photos, db.suppliers, db.auditLog], async () => {
-    for (const p of tables.purchases) {
-      if (await db.purchases.get({ year: p.year, no: p.no })) throw new BackupError(`Номер №${String(p.no).padStart(3, '0')} за ${p.year} год уже занят.`);
-    }
+  return db.transaction('rw', [db.periods, db.advances, db.purchases, db.photos, db.suppliers, db.counters, db.auditLog], async () => {
     const stripId = ({ id, ...record }) => record;
     const periodIds = new Map();
     for (const period of tables.periods) {
-      if (await db.periods.where('number').equals(period.number).count()) throw new BackupError(`Период ${period.number} уже есть в приложении.`);
+      const same = await db.periods.where('number').equals(period.number).filter(p => p.opened === period.opened && p.closed === period.closed).first();
+      if (same) throw new BackupError(`Период ${period.number} уже загружен.`);
       periodIds.set(period.id, await db.periods.add(stripId(period)));
     }
     const supplierIds = new Map();
@@ -373,6 +386,12 @@ function mergeArchive({ tables }, label) {
     for (const entry of tables.auditLog) {
       const ids = entry.entity === 'period' ? periodIds : purchaseIds;
       await db.auditLog.add({ ...stripId(entry), entityId: ids.get(entry.entityId) });
+    }
+    // Новые номера идут дальше архивных: совпадений больше не появится.
+    for (const { year, no } of tables.purchases) await raiseCounter(purchaseCounterKey(year), no);
+    for (const { number } of tables.periods) {
+      const [, year, seq] = number.split('-');
+      await raiseCounter(`period-${year}`, Number(seq));
     }
     await db.auditLog.add({ entity: 'archive', entityId: 0, field: 'fromArchive', before: null, after: label, at: nowLocal() });
   });

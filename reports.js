@@ -401,7 +401,8 @@ async function photosPdf(r) {
 
 /* Бэкап */
 
-// В имени файла есть год: нумерация обнуляется в январе, и №001 разных лет иначе затёрли бы друг друга.
+// Счётчик снимков ведётся по году и номеру, а не по закупке: после загрузки архива номер может
+// встретиться у двух закупок, и их фото не должны затирать друг друга.
 async function buildBackup() {
   await loadVendor('vendor/jszip.min.js');
   const zip = new JSZip();
@@ -413,10 +414,11 @@ async function buildBackup() {
   const perPurchase = new Map();
   tables.photos = [];
   await db.photos.each(({ blob, ...meta }) => {
-    const n = (perPurchase.get(meta.purchaseId) || 0) + 1;
-    perPurchase.set(meta.purchaseId, n);
     const { year, no } = purchases.get(meta.purchaseId);
-    const file = `photos/${year}-${pad3(no)}_${n}.jpg`;
+    const base = `${year}-${pad3(no)}`;
+    const n = (perPurchase.get(base) || 0) + 1;
+    perPurchase.set(base, n);
+    const file = `photos/${base}_${n}.jpg`;
     zip.file(file, blob);
     tables.photos.push({ ...meta, file });
   });
@@ -482,10 +484,11 @@ async function buildArchive(onProgress) {
     onProgress(i + 1, photos.length);
     const smaller = await compressPhoto(blob, ARCHIVE_PHOTO_SIDE, ARCHIVE_PHOTO_QUALITY);
     const best = smaller.size < blob.size ? smaller : blob;
-    const n = (perPurchase.get(meta.purchaseId) || 0) + 1;
-    perPurchase.set(meta.purchaseId, n);
     const { year, no } = byId.get(meta.purchaseId);
-    const file = `photos/${year}-${pad3(no)}_${n}.jpg`;
+    const base = `${year}-${pad3(no)}`;
+    const n = (perPurchase.get(base) || 0) + 1;
+    perPurchase.set(base, n);
+    const file = `photos/${base}_${n}.jpg`;
     zip.file(file, best);
     compressed += best.size;
     photoRows.push({ ...meta, file });
