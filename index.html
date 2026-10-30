@@ -270,6 +270,10 @@ tfoot td{font-weight:600}
 .tab[aria-current="true"]{color:var(--accent)}
 
 .toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(84px + env(safe-area-inset-bottom,0px));background:var(--ink);color:var(--bg);padding:10px 16px;border-radius:10px;font-size:14px;z-index:20;max-width:calc(100% - 32px);box-shadow:0 6px 20px rgba(0,0,0,.25)}
+@keyframes slide-left{from{opacity:.4;transform:translateX(28px)}}
+@keyframes slide-right{from{opacity:.4;transform:translateX(-28px)}}
+.slide-left{animation:slide-left .18s ease-out}
+.slide-right{animation:slide-right .18s ease-out}
 @media (prefers-reduced-motion: reduce){*{transition:none!important;animation:none!important}}
 </style>
 </head>

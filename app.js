@@ -61,8 +61,18 @@ function chips(el, name, options, value, warnKey) {
   if (radio) radio.checked = true;
 }
 
+let currentView = null;
+let swipeDirection = null;
+
 function show(view) {
   VIEWS.forEach(v => { $('v-' + v).hidden = v !== view; });
+  currentView = view;
+  if (swipeDirection) {
+    const section = $('v-' + view);
+    section.classList.add('slide-' + swipeDirection);
+    section.addEventListener('animationend', () => section.classList.remove('slide-left', 'slide-right'), { once: true });
+    swipeDirection = null;
+  }
   $('tabbar').hidden = !TABS.includes(view);
   document.querySelectorAll('.tab').forEach(t => t.setAttribute('aria-current', String(t.dataset.go === view)));
   if (view !== 'card' && view !== 'items') releaseViewPhotos();
@@ -80,6 +90,36 @@ document.addEventListener('click', e => {
   const go = e.target.closest('[data-go]');
   if (go) NAV[go.dataset.go]();
 });
+
+/* Свайп между вкладками */
+
+const SWIPE_MIN_PX = 70;
+const SWIPE_MAX_MS = 600;
+// Здесь палец и так ходит вбок: листают таблицу, ведут по графику, двигают курсор в поле.
+const SWIPE_IGNORE = '.scroll, .plot, input, textarea, select';
+let swipeStart = null;
+
+document.addEventListener('touchstart', e => {
+  swipeStart = null;
+  if (e.touches.length !== 1 || !TABS.includes(currentView) || e.target.closest(SWIPE_IGNORE)) return;
+  swipeStart = { x: e.touches[0].clientX, y: e.touches[0].clientY, at: Date.now() };
+}, { passive: true });
+
+document.addEventListener('touchend', e => {
+  if (!swipeStart) return;
+  const dx = e.changedTouches[0].clientX - swipeStart.x;
+  const dy = e.changedTouches[0].clientY - swipeStart.y;
+  const quick = Date.now() - swipeStart.at <= SWIPE_MAX_MS;
+  swipeStart = null;
+  // Наклонное движение — это прокрутка страницы, а не свайп.
+  if (!quick || Math.abs(dx) < SWIPE_MIN_PX || Math.abs(dx) < Math.abs(dy) * 2) return;
+  const next = TABS[TABS.indexOf(currentView) + (dx < 0 ? 1 : -1)];
+  if (!next) return;
+  swipeDirection = dx < 0 ? 'left' : 'right';
+  NAV[next]();
+}, { passive: true });
+
+document.addEventListener('touchcancel', () => { swipeStart = null; }, { passive: true });
 
 // iOS держит приложение в памяти днями: дата в шапке не должна застывать.
 document.addEventListener('visibilitychange', () => {
