@@ -9,6 +9,8 @@ const UNITS = ['шт', 'м', 'п.м.', 'м²', 'м³', 'кг', 'т', 'л', 'уп
 const VIEWS = ['home', 'new', 'done', 'card', 'search', 'adv', 'items', 'report', 'close', 'more', 'dict', 'restore', 'archive', 'unarchive', 'wipe', 'log'];
 const TABS = ['home', 'report', 'more'];
 const ANDROID = /Android/.test(navigator.userAgent);
+// Chrome на Android отклоняет эти файлы в «Поделиться», хотя canShare отвечает true.
+const ANDROID_NO_SHARE = /\.(xlsx|zip)$/;
 const PHOTO_MAX_SIDE = 1600;
 const PHOTO_QUALITY = 0.7;
 const DOUBLE_TAP_MS = 600;
@@ -1381,18 +1383,31 @@ function downloadFile(file) {
 
 // Safari разрешает «Поделиться» только сразу после нажатия. Если файл собирался дольше, просим ещё одно.
 function offerFile(file) {
+  if (ANDROID && !$('ready').hidden) $('ready-close').click();
   return new Promise(resolve => {
     $('ready-name').textContent = `Файл готов: ${file.name}`;
     $('ready').hidden = false;
+    $('ready-close').hidden = !ANDROID;
+    $('ready-close').onclick = () => {
+      $('ready').hidden = true;
+      resolve(false);
+    };
     $('ready-send').onclick = async () => {
       $('ready').hidden = true;
-      resolve(await deliverFile(file));
+      resolve(await deliverFile(file, true));
     };
   });
 }
 
+function saveToDownloads(file) {
+  downloadFile(file);
+  toast(`Файл сохранён в «Загрузки»: ${file.name}. Отправьте его оттуда.`, 8000);
+  return true;
+}
+
 // true, если файл передан. Отмена в окне «Поделиться» — не ошибка, а false.
-async function deliverFile(file) {
+async function deliverFile(file, retried = false) {
+  if (ANDROID && ANDROID_NO_SHARE.test(file.name)) return saveToDownloads(file);
   const data = { files: [file], title: file.name };
   if (!navigator.canShare || !navigator.canShare(data)) {
     downloadFile(file);
@@ -1403,7 +1418,7 @@ async function deliverFile(file) {
     return true;
   } catch (err) {
     if (err.name === 'AbortError') return false;
-    if (err.name === 'NotAllowedError') return offerFile(file);
+    if (err.name === 'NotAllowedError') return ANDROID && retried ? saveToDownloads(file) : offerFile(file);
     throw err;
   }
 }
