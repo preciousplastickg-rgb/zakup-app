@@ -221,7 +221,7 @@ function addAdvance({ amount, method, by, date }) {
 }
 
 // Фото сжимается до вызова: внутри транзакции нельзя ждать ничего, кроме самой базы.
-// photos: [{ kind: 'receipt' | 'goods', blob }].
+// photos: [{ kind: 'receipt' | 'goods' | 'supplier', blob }].
 function savePurchase({ type, goodsName, amount, supplierName, phone, place, docType, payment, comment }, photos) {
   const dt = nowLocal();
   const year = Number(dt.slice(0, 4));
@@ -298,6 +298,14 @@ function saveBazaar(id, changes) {
 }
 
 // Фото сжимаются до вызова: внутри транзакции нельзя ждать ничего, кроме самой базы.
+// Снимки поставщика лежат в его закупках, новые первыми.
+async function getSupplierPhotos(supplierId) {
+  const purchases = await db.purchases.where('supplierId').equals(supplierId).toArray();
+  const byId = new Map(purchases.map(p => [p.id, p]));
+  const photos = await db.photos.where('purchaseId').anyOf([...byId.keys()]).filter(p => p.kind === 'supplier').toArray();
+  return photos.sort((a, b) => b.id - a.id).map(photo => ({ ...photo, purchase: byId.get(photo.purchaseId) }));
+}
+
 function addPhotos(purchaseId, kind, blobs) {
   return db.transaction('rw', db.purchases, db.periods, db.photos, db.auditLog, async () => {
     await getEditablePurchase(purchaseId);

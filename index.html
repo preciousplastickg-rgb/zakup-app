@@ -176,6 +176,10 @@ textarea.input{min-height:70px;resize:vertical}
 .thumbs{display:flex;flex-wrap:wrap;gap:8px}
 .thumb{position:relative;width:76px;height:76px}
 .thumb img{display:block;width:100%;height:100%;object-fit:cover;border-radius:8px}
+.shot{width:76px;height:76px;padding:0;border:0;background:none;cursor:pointer}
+.shot img{display:block;width:100%;height:100%;object-fit:cover;border-radius:8px}
+.shot.wide{width:100%;height:auto}
+.shot.wide img{height:auto}
 /* Кнопка 44 pt при маленьком видимом кружке */
 .thumb button{position:absolute;top:0;right:0;width:44px;height:44px;padding:4px;border:0;background:none;cursor:pointer;display:flex;justify-content:flex-end;align-items:flex-start}
 .thumb button span{width:22px;height:22px;border-radius:50%;background:var(--ink);color:var(--bg);display:grid;place-items:center;font-size:15px;line-height:1}
@@ -333,6 +337,17 @@ tfoot td{font-weight:600}
     <div class="chips" id="f-place"></div>
     <div class="row" id="f-place-new" hidden><input class="input" id="f-place-name" placeholder="Название базара" aria-label="Название базара" autocomplete="off"><button class="btn" type="button" id="f-place-save">Добавить</button></div>
     <button class="linkbtn" type="button" id="f-place-add">+ Добавить базар</button></div>
+  <div class="field" id="f-sp-field"><span class="label" id="f-sp-label">Фото поставщика</span>
+    <span class="muted hint" id="f-sp-known-hint" hidden>Прошлые снимки. Нажмите, чтобы увеличить.</span>
+    <div class="thumbs" id="f-sp-known"></div>
+    <div class="thumbs" id="f-sp-list"></div>
+    <label class="photo" for="f-sp">
+      <span class="ic"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg></span>
+      <span><b id="f-sp-title">Сфотографировать поставщика</b><br><span class="muted hint">Например, контейнер. В отчёт не попадает.</span></span>
+    </label>
+    <input class="file-input" type="file" id="f-sp" accept="image/*" capture="environment" tabindex="-1" aria-label="Фото поставщика">
+    <label class="linkbtn pick" for="f-sp-lib">Выбрать из галереи</label>
+    <input class="file-input" type="file" id="f-sp-lib" accept="image/*" multiple tabindex="-1" aria-label="Фото поставщика из галереи"></div>
   <div class="field"><label class="label" for="f-amount">Сумма, сом</label>
     <input class="input big" id="f-amount" inputmode="decimal" placeholder="0" autocomplete="off">
     <span class="muted hint" id="f-amount-hint" hidden>Сумма считается по позициям. Изменить её можно через позиции.</span></div>
@@ -493,6 +508,7 @@ tfoot td{font-weight:600}
   </div>
   <label class="switch" for="d-hide"><span>В архиве, не предлагать при закупке</span><input type="checkbox" id="d-hide"></label>
   <button class="btn primary full" type="button" id="d-save">Сохранить</button>
+  <div id="d-photos" class="stack" hidden></div>
 </section>
 
 <!-- RESTORE -->

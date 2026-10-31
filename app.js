@@ -95,7 +95,7 @@ function show(view) {
   $('toast').hidden = true;
   $('tabbar').hidden = !TABS.includes(view);
   document.querySelectorAll('.tab').forEach(t => t.setAttribute('aria-current', String(t.dataset.go === view)));
-  if (view !== 'card' && view !== 'items') releaseViewPhotos();
+  if (view !== 'card' && view !== 'items' && view !== 'dict') releaseViewPhotos();
   window.scrollTo(0, scrollTop);
   if (view !== 'home') armSystemBack();
 }
@@ -419,33 +419,67 @@ const form = {
   session: {},        // новая форма — новый объект: по нему отсекается фото, дожатое для прошлой формы
   receipts: [],       // [{ blob, url }]
   goods: [],          // [{ blob, url }]
+  supplierShots: [],  // [{ blob, url }]
+  knownUrls: [],      // прошлые снимки выбранного поставщика
   photoJobs: [],
   noDocArmedAt: 0,
   saving: false,
 };
 
-// Снимки формы: два одинаковых ряда, чеки и товар.
+// Снимки формы: одинаковые ряды для чеков, товара и поставщика.
 const FORM_PHOTOS = {
   receipt: { list: 'receipts', box: 'f-photo-list', title: 'f-photo-title', alt: 'Фото чека' },
   goods: { list: 'goods', box: 'f-goods-list', title: 'f-goods-title', alt: 'Фото товара' },
+  supplier: { list: 'supplierShots', box: 'f-sp-list', title: 'f-sp-title', alt: 'Фото поставщика' },
 };
+
+const KNOWN_SHOTS = 3;   // столько прошлых снимков поставщика видно в форме
 
 function renderPhotos(kind) {
   const { list, box, title, alt } = FORM_PHOTOS[kind];
   $(box).innerHTML = form[list].map((p, i) =>
     `<span class="thumb"><img src="${p.url}" alt="${alt} ${i + 1}"><button type="button" data-del-photo="${kind}" data-index="${i}" aria-label="Удалить: ${alt} ${i + 1}"><span>×</span></button></span>`
   ).join('');
-  const empty = kind === 'receipt' ? 'Сфотографировать чек' : radioVal('type') === 'service' ? 'Сделать фото' : 'Сфотографировать товар';
+  const service = radioVal('type') === 'service';
+  const empty = {
+    receipt: 'Сфотографировать чек',
+    goods: service ? 'Сделать фото' : 'Сфотографировать товар',
+    supplier: service ? 'Сфотографировать исполнителя' : 'Сфотографировать поставщика',
+  }[kind];
   $(title).textContent = form[list].length ? 'Добавить ещё фото' : empty;
 }
 
 function clearPhotos() {
-  [...form.receipts, ...form.goods].forEach(p => URL.revokeObjectURL(p.url));
+  [...form.receipts, ...form.goods, ...form.supplierShots].forEach(p => URL.revokeObjectURL(p.url));
   form.receipts = [];
   form.goods = [];
+  form.supplierShots = [];
   renderPhotos('receipt');
   renderPhotos('goods');
+  renderPhotos('supplier');
+  showKnownShots([]);
 }
+
+function showKnownShots(shots) {
+  form.knownUrls.forEach(url => URL.revokeObjectURL(url));
+  form.knownUrls = shots.slice(0, KNOWN_SHOTS).map(shot => URL.createObjectURL(shot.blob));
+  $('f-sp-known').innerHTML = form.knownUrls.map(url => `<button class="shot" type="button" aria-label="Увеличить снимок"><img src="${url}" alt="Прошлый снимок поставщика"></button>`).join('');
+  $('f-sp-known-hint').hidden = !shots.length;
+}
+
+// По прошлым снимкам вспоминают, какой это был контейнер.
+async function updateKnownShots() {
+  const name = () => $('f-supplier').value.trim().toLowerCase();
+  const query = name();
+  const known = !form.editing && form.suppliers.find(s => s.name.toLowerCase() === query);
+  const shots = known ? await getSupplierPhotos(known.id) : [];
+  if (query === name()) showKnownShots(shots);
+}
+
+$('f-sp-known').addEventListener('click', e => {
+  const shot = e.target.closest('.shot');
+  if (shot) shot.classList.toggle('wide');
+});
 
 function renderPlaces(selected) {
   const names = form.bazaars.map(b => b.name);
@@ -461,8 +495,10 @@ function applyPurchaseType() {
   $('f-goods-label').textContent = service ? 'Фото' : 'Фото товара';
   $('f-supplier-label').textContent = service ? 'Исполнитель' : 'Поставщик';
   $('f-phone-label').textContent = service ? 'Телефон исполнителя' : 'Телефон поставщика';
+  $('f-sp-label').textContent = service ? 'Фото исполнителя' : 'Фото поставщика';
   $('f-place-field').hidden = service;
   renderPhotos('goods');
+  renderPhotos('supplier');
   updateSuggestions();
 }
 
@@ -486,6 +522,7 @@ function fillForm({ editing, no, balance, bazaars, suppliers, history, place, ty
   $('f-back').dataset.go = editing ? 'card' : 'home';
   $('f-receipt-block').hidden = !!editing;
   $('f-goods-field').hidden = !!editing;
+  $('f-sp-field').hidden = !!editing;
   $('f-date-field').hidden = !editing;
   const itemized = !!editing && editing.items.length > 0;
   $('f-amount').readOnly = itemized;
@@ -625,14 +662,14 @@ function queuePhotos(kind, files) {
   }));
 }
 
-[['f-photo', 'receipt'], ['f-photo-lib', 'receipt'], ['f-goods', 'goods'], ['f-goods-lib', 'goods']].forEach(([id, kind]) => {
+[['f-photo', 'receipt'], ['f-photo-lib', 'receipt'], ['f-goods', 'goods'], ['f-goods-lib', 'goods'], ['f-sp', 'supplier'], ['f-sp-lib', 'supplier']].forEach(([id, kind]) => {
   $(id).addEventListener('change', e => {
     const files = takePickedFiles(e.target);
     if (files.length) queuePhotos(kind, files);
   });
 });
 
-['f-photo-list', 'f-goods-list'].forEach(id => $(id).addEventListener('click', e => {
+['f-photo-list', 'f-goods-list', 'f-sp-list'].forEach(id => $(id).addEventListener('click', e => {
   const b = e.target.closest('[data-del-photo]');
   if (!b) return;
   const { delPhoto: kind, index } = b.dataset;
@@ -715,6 +752,7 @@ function pickSupplier(name) {
   $('f-supplier').value = name;
   applySupplierDefaults(name);
   updateSuggestions();
+  updateKnownShots();
 }
 
 // Известный товар сразу подставляет поставщика, у которого его брали в прошлый раз.
@@ -731,6 +769,7 @@ $('f-name').addEventListener('input', updateSuggestions);
 $('f-supplier').addEventListener('input', () => {
   dropAutoPhone();
   updateSuggestions();
+  updateKnownShots();
 });
 // Не на каждую букву: «ИП Асанов» может оказаться началом имени другого поставщика.
 $('f-supplier').addEventListener('change', e => applySupplierDefaults(e.target.value));
@@ -846,6 +885,7 @@ async function submitPurchase() {
       const photos = [
         ...form.receipts.map(p => ({ kind: 'receipt', blob: p.blob })),
         ...form.goods.map(p => ({ kind: 'goods', blob: p.blob })),
+        ...form.supplierShots.map(p => ({ kind: 'supplier', blob: p.blob })),
       ];
       saved = await savePurchase(data, photos);
     }
@@ -985,6 +1025,7 @@ async function openCard(id, next = null) {
   const shots = photos.map(p => ({ id: p.id, kind: p.kind, url: viewPhotoUrl(p.blob) }));
   const receipts = shots.filter(p => p.kind === 'receipt');
   const goods = shots.filter(p => p.kind === 'goods');
+  const supplierShots = shots.filter(p => p.kind === 'supplier');
   const storno = x.status === 'storno';
   const editable = !storno && period.status === 'open';
   const service = x.type === 'service';
@@ -1018,6 +1059,9 @@ async function openCard(id, next = null) {
     (goods.length || editable ? `<div class="section-h"><h3>${service ? 'Фото' : 'Фото товара'}</h3></div>` : '') +
     goods.map(p => shotHtml(p, `Фото товара №${pad3(x.no)}`, editable)).join('') +
     (editable ? `<label class="btn full" for="c-add-goods">${service ? 'Добавить фото' : 'Добавить фото товара'}</label><input class="file-input" type="file" id="c-add-goods" accept="image/*" multiple tabindex="-1" aria-label="Добавить фото товара">` : '') +
+    (supplierShots.length || editable ? `<div class="section-h"><h3>${service ? 'Фото исполнителя' : 'Фото поставщика'}</h3></div>` : '') +
+    supplierShots.map(p => shotHtml(p, `Фото поставщика, закупка №${pad3(x.no)}`, editable)).join('') +
+    (editable ? `<label class="btn full" for="c-add-supplier">${service ? 'Добавить фото исполнителя' : 'Добавить фото поставщика'}</label><input class="file-input" type="file" id="c-add-supplier" accept="image/*" multiple tabindex="-1" aria-label="Добавить фото поставщика">` : '') +
     (history.length
       ? `<div class="section-h"><h3>История изменений</h3></div><div class="list">${history.map(e => renderAudit(e, ctx, false)).join('')}</div>`
       : '') +
@@ -1030,6 +1074,7 @@ async function openCard(id, next = null) {
     $('c-st-open').onclick = () => openStorno(x);
     $('c-add-receipt').onchange = e => addCardPhotos(id, 'receipt', e.target);
     $('c-add-goods').onchange = e => addCardPhotos(id, 'goods', e.target);
+    $('c-add-supplier').onchange = e => addCardPhotos(id, 'supplier', e.target);
     $('c-body').querySelectorAll('[data-del-shot]').forEach(b => {
       confirmTwice(b, 'Удалить это фото', 'Нажмите ещё раз: удалить фото', async () => {
         await deletePhoto(Number(b.dataset.delShot));
@@ -2090,6 +2135,13 @@ async function openDict(kind, id) {
   $('d-phone').value = record.phone || '';
   $('d-comment').value = record.comment || '';
   $('d-hide').checked = supplier ? record.archived : !record.active;
+  const shots = supplier ? await getSupplierPhotos(id) : [];
+  releaseViewPhotos();
+  $('d-photos').hidden = !shots.length;
+  $('d-photos').innerHTML = shots.length
+    ? '<div class="section-h"><h3>Фото поставщика</h3></div>' + shots.map(({ blob, purchase }) =>
+      `<img class="photo-full" src="${viewPhotoUrl(blob)}" alt="Фото поставщика, закупка №${pad3(purchase.no)}"><p class="muted hint">Закупка №${pad3(purchase.no)}, ${dFull(purchase.dt)}</p>`).join('')
+    : '';
   show('dict');
 }
 
