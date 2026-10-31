@@ -8,6 +8,7 @@ const TYPES = { goods: 'Товар', service: 'Услуга' };
 const UNITS = ['шт', 'м', 'п.м.', 'м²', 'м³', 'кг', 'т', 'л', 'уп.', 'лист', 'меш.', 'рулон', 'рейс', 'час', 'услуга'];
 const VIEWS = ['home', 'new', 'done', 'card', 'search', 'adv', 'items', 'report', 'close', 'more', 'dict', 'restore', 'archive', 'unarchive', 'wipe', 'log'];
 const TABS = ['home', 'report', 'more'];
+const ANDROID = /Android/.test(navigator.userAgent);
 const PHOTO_MAX_SIDE = 1600;
 const PHOTO_QUALITY = 0.7;
 const DOUBLE_TAP_MS = 600;
@@ -45,12 +46,12 @@ function plural(n, one, few, many) {
 }
 
 let toastTimer;
-function toast(msg) {
+function toast(msg, ms = 3200) {
   const t = $('toast');
   t.textContent = msg;
   t.hidden = false;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { t.hidden = true; }, 3200);
+  toastTimer = setTimeout(() => { t.hidden = true; }, ms);
 }
 
 function chips(el, name, options, value, warnKey) {
@@ -67,6 +68,7 @@ let viewSnapshot = '';
 let leaveWarnedAt = 0;
 let peek = null;         // пока соседний экран готовится к свайпу, show только запоминает его
 const listScroll = {};   // где был список, когда открыли карточку
+let backArmed = false;   // Android: есть запись в истории, которую заберёт системная кнопка «Назад»
 
 // Чеки разбирают подряд: после карточки список остаётся там, где был.
 const restoredScroll = view => (currentView === 'card' && view === cardBack ? listScroll[view] || 0 : 0);
@@ -93,6 +95,13 @@ function show(view) {
   document.querySelectorAll('.tab').forEach(t => t.setAttribute('aria-current', String(t.dataset.go === view)));
   if (view !== 'card' && view !== 'items') releaseViewPhotos();
   window.scrollTo(0, scrollTop);
+  if (view !== 'home') armSystemBack();
+}
+
+function armSystemBack() {
+  if (!ANDROID || backArmed) return;
+  history.pushState(null, '');
+  backArmed = true;
 }
 
 async function showHome() {
@@ -285,6 +294,24 @@ document.addEventListener('touchmove', e => {
   swipeStart = null;
   if (drag && !drag.released) releaseDrag(drag, type === 'touchend');
 }, { passive: true }));
+
+// На Android системная кнопка «Назад» работает как «Назад» в приложении и не теряет введённое. На главной она закрывает его.
+if (ANDROID) {
+  history.scrollRestoration = 'manual';
+  window.addEventListener('popstate', () => {
+    backArmed = false;
+    const go = swipeGoal(1);
+    if (!go) {
+      toast('Нажмите «Назад» ещё раз, чтобы выйти.');
+      return;
+    }
+    if (drag || (!TABS.includes(currentView) && mustConfirmLeave('Нажмите «Назад» ещё раз, чтобы выйти.'))) {
+      armSystemBack();
+      return;
+    }
+    NAV[go]();
+  });
+}
 
 // iOS держит приложение в памяти днями: дата в шапке не должна застывать.
 document.addEventListener('visibilitychange', () => {
@@ -2129,9 +2156,17 @@ $('a-save').onclick = submitAdvance;
 
 /* Запуск */
 
+// Отладчик к телефону не подключить, поэтому на Android причина видна прямо на экране.
+function errorDetails(reason) {
+  const { name, message, stack } = Object(reason);
+  const place = /(?:app|db|reports)\.js:\d+/.exec(stack || '');
+  return [name, message || String(reason), place && place[0]].filter(Boolean).join(' · ').slice(0, 200);
+}
+
 window.addEventListener('unhandledrejection', e => {
   console.error(e.reason);
-  toast('Ошибка приложения. Закройте его и откройте снова.');
+  if (ANDROID) toast(`Ошибка приложения: ${errorDetails(e.reason)}. Закройте его и откройте снова.`, 20000);
+  else toast('Ошибка приложения. Закройте его и откройте снова.');
 });
 
 async function start() {
