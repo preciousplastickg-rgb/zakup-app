@@ -37,6 +37,29 @@ db.version(2).stores({ bazaars: '++id, &name' }).upgrade(async tx => {
 // написанный на чеке, даже если такой уже выдан заново, например после удаления всех записей.
 db.version(3).stores({ purchases: '++id, &[periodId+year+no], periodId, dt, supplierId, purposeId, status' });
 
+// Возврат, который до версии 4 хранился в периоде: день закрытия, у переоткрытого периода — сегодня.
+const closingReturn = p => ({
+  periodId: p.id, dt: `${p.closed || nowLocal().slice(0, 10)}T23:59`, amount: p.ret, method: 'cash', to: 'Бухгалтерия', comment: 'При закрытии периода',
+});
+
+// Версия 4: долги поставщикам и возвраты денег. Возврат стал отдельной записью, а не полем периода:
+// часть денег можно вернуть в любой день, а не только при закрытии.
+db.version(4).stores({
+  returns: '++id, periodId, dt',
+  repayments: '++id, purchaseId, periodId, dt',
+}).upgrade(async tx => {
+  const periods = await tx.table('periods').toArray();
+  await tx.table('returns').bulkAdd(periods.filter(p => p.ret > 0).map(closingReturn));
+  await tx.table('periods').toCollection().modify(p => { delete p.ret; });
+});
+
+// То же для копий и архивов старых версий: они приходят обычными массивами.
+function migrateTablesV4(tables) {
+  tables.returns = tables.periods.filter(p => p.ret > 0).map((p, i) => ({ id: i + 1, ...closingReturn(p) }));
+  tables.periods.forEach(p => { delete p.ret; });
+  tables.repayments = [];
+}
+
 db.on('populate', tx => {
   seedBazaars(tx);
   tx.table('settings').add({ key: 'org', value: 'Азия Сталь' });
@@ -81,6 +104,14 @@ const purchaseCounterKey = year => `purchase-${year}`;
 class NameTakenError extends Error {}
 class PeriodOpenError extends Error {}
 class BackupError extends Error {}
+// Сумма больше допустимой: limit — сколько можно.
+class LimitError extends Error {
+  constructor(limit) {
+    super('Сумма больше допустимой');
+    this.limit = limit;
+  }
+}
+class HasRepaymentsError extends Error {}
 
 const BACKUP_MAX_DAYS = 7;
 const BACKUP_MAX_PURCHASES = 20;
@@ -130,24 +161,61 @@ async function peekPurchaseNo() {
 
 const sumAmounts = list => list.reduce((sum, x) => sum + x.amount, 0);
 
-// Остаток нигде не хранится и считается здесь: Σ выдач − Σ активных закупок − возврат.
+// Взятое в долг не тратит аванс: из него уходит только оплаченное сразу, остальное — позже, погашениями.
+const debtOf = p => (p.status === 'active' && p.payment === 'debt' ? p.amount - p.paidNow : 0);
+const sumDebts = list => list.reduce((sum, p) => sum + debtOf(p), 0);
+
+// Остаток нигде не хранится и считается здесь:
+// Σ выдач − (Σ активных закупок − их часть в долг + Σ погашений долга) − Σ возвратов.
+// Вызывающая транзакция должна включать periods, advances, purchases, returns и repayments.
 async function periodSummary(period) {
-  const advances = period ? await db.advances.where('periodId').equals(period.id).toArray() : [];
-  const purchases = period ? await db.purchases.where('periodId').equals(period.id).toArray() : [];
+  const of = table => (period ? table.where('periodId').equals(period.id).toArray() : []);
+  const advances = await of(db.advances);
+  const purchases = await of(db.purchases);
+  const returns = await of(db.returns);
+  const repayments = await of(db.repayments);
   const active = purchases.filter(p => p.status === 'active');
   const issued = sumAmounts(advances);
-  const spent = sumAmounts(active);
-  const ret = period ? period.ret : 0;
+  const bought = sumAmounts(active);
+  const onDebt = sumDebts(active);
+  const repaid = sumAmounts(repayments);
+  const spent = bought - onDebt + repaid;
+  const returned = sumAmounts(returns);
   return {
     advances,
     purchases,
+    returns,
+    repayments,
     issued,
+    bought,
+    onDebt,
+    repaid,
     spent,
+    returned,
     noDoc: sumAmounts(active.filter(p => p.docType === 'none')),
     count: active.length,
-    balance: issued - spent - ret,
+    balance: issued - spent - returned,
   };
 }
+
+const repaidFor = async purchaseId => sumAmounts(await db.repayments.where('purchaseId').equals(purchaseId).toArray());
+
+// Непогашенные долги по всем периодам: закупки с погашениями и остатком долга left.
+// until — день: долг на конец этого дня, без более поздних закупок и погашений.
+async function getDebts(until = null) {
+  const inTime = x => !until || x.dt.slice(0, 10) <= until;
+  const purchases = await db.purchases.filter(p => debtOf(p) > 0 && inTime(p)).toArray();
+  const repayments = await db.repayments.where('purchaseId').anyOf(purchases.map(p => p.id)).filter(inTime).toArray();
+  return purchases
+    .map(p => {
+      const own = repayments.filter(r => r.purchaseId === p.id);
+      return { ...p, repayments: own, repaid: sumAmounts(own), left: debtOf(p) - sumAmounts(own) };
+    })
+    .filter(p => p.left > 0)
+    .sort((a, b) => a.dt.localeCompare(b.dt));
+}
+
+const sumLeft = debts => debts.reduce((sum, d) => sum + d.left, 0);
 
 /* Запись. Эти функции вызываются только внутри транзакции. */
 
@@ -169,7 +237,6 @@ async function ensureOpenPeriod(date) {
     status: 'open',
     opened: date,
     closed: null,
-    ret: 0,
     revision: 0,
   };
   period.id = await db.periods.add(period);
@@ -222,7 +289,7 @@ function addAdvance({ amount, method, by, date }) {
 
 // Фото сжимается до вызова: внутри транзакции нельзя ждать ничего, кроме самой базы.
 // photos: [{ kind: 'receipt' | 'goods' | 'supplier', blob }].
-function savePurchase({ type, goodsName, amount, supplierName, phone, place, docType, payment, comment }, photos) {
+function savePurchase({ type, goodsName, amount, paidNow, supplierName, phone, place, docType, payment, comment }, photos) {
   const dt = nowLocal();
   const year = Number(dt.slice(0, 4));
   return db.transaction('rw', db.purchases, db.counters, db.photos, db.suppliers, db.periods, db.auditLog, async () => {
@@ -231,31 +298,42 @@ function savePurchase({ type, goodsName, amount, supplierName, phone, place, doc
     const no = await nextCounter(purchaseCounterKey(year));
     const id = await db.purchases.add({
       year, no, periodId: period.id, dt, type, goodsName, supplierId, place, amount,
-      payment, docType, comment, items: [], status: 'active', stornoReason: null,
+      payment, paidNow, docType, comment, items: [], status: 'active', stornoReason: null,
     });
     await db.photos.bulkAdd(photos.map(photo => ({ ...photo, purchaseId: id })));
     return { id, no, periodId: period.id };
   });
 }
 
+// Погашенное уже отдано поставщику: долг закупки не может стать меньше него.
+async function assertDebtCovers(purchase, changes) {
+  const repaid = await repaidFor(purchase.id);
+  if (repaid && debtOf({ ...purchase, ...changes }) < repaid) throw new LimitError(repaid);
+}
+
 // date — только день, время покупки остаётся прежним.
-function updatePurchase(id, { type, goodsName, date, amount, supplierName, phone, place, docType, payment, comment }) {
-  return db.transaction('rw', db.purchases, db.periods, db.suppliers, db.auditLog, async () => {
+function updatePurchase(id, { type, goodsName, date, amount, paidNow, supplierName, phone, place, docType, payment, comment }) {
+  return db.transaction('rw', [db.purchases, db.periods, db.suppliers, db.repayments, db.auditLog], async () => {
     const purchase = await getEditablePurchase(id);
     const supplierId = await findOrCreateSupplier(supplierName, place, phone);
     const changes = { type, goodsName, dt: date + purchase.dt.slice(10), supplierId, place, docType, payment, comment };
+    // У старых закупок поля нет: без долга оно не нужно и не должно засорять журнал.
+    if (payment === 'debt' || purchase.payment === 'debt') changes.paidNow = payment === 'debt' ? paidNow : 0;
     // Сумма закупки с позициями считается только по ним.
     if (!purchase.items.length) changes.amount = amount;
+    await assertDebtCovers(purchase, changes);
     await applyChanges(db.purchases, 'purchase', purchase, changes);
   });
 }
 
 // Пустой список убирает позиции, сумма закупки при этом остаётся прежней.
+// У закупки в долг новая сумма меняет долг, а оплаченное сразу остаётся прежним.
 function savePurchaseItems(id, items) {
-  return db.transaction('rw', db.purchases, db.periods, db.auditLog, async () => {
+  return db.transaction('rw', db.purchases, db.periods, db.repayments, db.auditLog, async () => {
     const purchase = await getEditablePurchase(id);
     const changes = { items };
     if (items.length) changes.amount = items.reduce((sum, item) => sum + item.sum, 0);
+    await assertDebtCovers(purchase, changes);
     await applyChanges(db.purchases, 'purchase', purchase, changes);
   });
 }
@@ -267,9 +345,15 @@ async function nextWithoutItems({ id, periodId }) {
   return rest.length ? { purchase: rest.find(p => p.id > id) || rest[0], left: rest.length } : null;
 }
 
+// Деньги за закупку уже отданы поставщику: сначала удаляются погашения.
+async function assertNoRepayments(purchaseId) {
+  if (await db.repayments.where('purchaseId').equals(purchaseId).count()) throw new HasRepaymentsError();
+}
+
 function stornoPurchase(id, reason) {
-  return db.transaction('rw', db.purchases, db.periods, db.auditLog, async () => {
+  return db.transaction('rw', db.purchases, db.periods, db.repayments, db.auditLog, async () => {
     const purchase = await getEditablePurchase(id);
+    await assertNoRepayments(id);
     await applyChanges(db.purchases, 'purchase', purchase, { status: 'storno', stornoReason: reason });
   });
 }
@@ -325,15 +409,67 @@ function deletePhoto(id) {
 
 // Удаление ошибочной записи. Номер не освобождается: он мог уже попасть на бумажный чек.
 function deletePurchase(id) {
-  return db.transaction('rw', db.purchases, db.periods, db.photos, db.auditLog, async () => {
+  return db.transaction('rw', [db.purchases, db.periods, db.photos, db.repayments, db.auditLog], async () => {
     const purchase = await db.purchases.get(id);
     const period = await db.periods.get(purchase.periodId);
     if (period.status !== 'open') throw new Error('Период закрыт');
+    await assertNoRepayments(id);
     await db.photos.where('purchaseId').equals(id).delete();
     await db.purchases.delete(id);
     const label = `№${String(purchase.no).padStart(3, '0')} ${purchaseTitle(purchase)}, ${money(purchase.amount)} сом`;
     await db.auditLog.add({ entity: 'purchase', entityId: id, field: 'deleted', before: label, after: null, at: nowLocal() });
   });
+}
+
+async function deleteOpenRecord(table, entity, id, label) {
+  const record = await table.get(id);
+  const period = await db.periods.get(record.periodId);
+  if (period.status !== 'open') throw new Error('Период закрыт');
+  await table.delete(id);
+  await db.auditLog.add({ entity, entityId: id, field: 'deleted', before: label(record), after: null, at: nowLocal() });
+}
+
+// Возврат денег бухгалтеру в любой день открытого периода. Вернуть можно не больше, чем на руках.
+function addReturn({ amount, method, to, dt, comment }) {
+  return db.transaction('rw', [db.periods, db.advances, db.purchases, db.returns, db.repayments], async () => {
+    const period = await getOpenPeriod();
+    const { balance } = await periodSummary(period);
+    if (!period || amount > balance) throw new LimitError(Math.max(balance, 0));
+    await db.returns.add({ periodId: period.id, dt, amount, method, to, comment });
+  });
+}
+
+function deleteReturn(id) {
+  return db.transaction('rw', db.returns, db.periods, db.auditLog, () =>
+    deleteOpenRecord(db.returns, 'return', id, r => `${money(r.amount)} сом от ${r.dt.slice(0, 10)}`));
+}
+
+// Погашение идёт из аванса открытого периода, даже если долг взят в закрытом.
+// Сумма раскладывается по закупкам со старой: так обычно и считают с поставщиком.
+function repayDebts(purchaseIds, { amount, method, dt, comment }) {
+  return db.transaction('rw', [db.purchases, db.repayments, db.periods, db.counters], async () => {
+    const debts = [];
+    for (const id of purchaseIds) {
+      const purchase = await db.purchases.get(id);
+      const left = purchase ? debtOf(purchase) - await repaidFor(id) : 0;
+      if (left > 0) debts.push({ id, left, dt: purchase.dt });
+    }
+    const total = sumLeft(debts);
+    if (amount > total) throw new LimitError(total);
+    const period = await ensureOpenPeriod(dt.slice(0, 10));
+    let rest = amount;
+    for (const debt of debts.sort((a, b) => a.dt.localeCompare(b.dt))) {
+      if (!rest) break;
+      const part = Math.min(rest, debt.left);
+      await db.repayments.add({ purchaseId: debt.id, periodId: period.id, dt, amount: part, method, comment });
+      rest -= part;
+    }
+  });
+}
+
+function deleteRepayment(id) {
+  return db.transaction('rw', db.repayments, db.periods, db.auditLog, () =>
+    deleteOpenRecord(db.repayments, 'repayment', id, r => `${money(r.amount)} сом от ${r.dt.slice(0, 10)}`));
 }
 
 function deleteAdvance(id) {
@@ -348,12 +484,14 @@ function deleteAdvance(id) {
 
 // Закрытые периоды уходят в архивный файл. Счётчики не трогаем: номера не должны повториться.
 function removeArchivedPeriods(periodIds, label) {
-  return db.transaction('rw', db.periods, db.advances, db.purchases, db.photos, db.auditLog, async () => {
+  return db.transaction('rw', [db.periods, db.advances, db.purchases, db.photos, db.returns, db.repayments, db.auditLog], async () => {
     const purchaseIds = await db.purchases.where('periodId').anyOf(periodIds).primaryKeys();
     await db.photos.where('purchaseId').anyOf(purchaseIds).delete();
     await db.auditLog.filter(e => (e.entity === 'purchase' && purchaseIds.includes(e.entityId)) || (e.entity === 'period' && periodIds.includes(e.entityId))).delete();
     await db.purchases.where('periodId').anyOf(periodIds).delete();
     await db.advances.where('periodId').anyOf(periodIds).delete();
+    await db.returns.where('periodId').anyOf(periodIds).delete();
+    await db.repayments.where('periodId').anyOf(periodIds).delete();
     await db.periods.bulkDelete(periodIds);
     await db.auditLog.add({ entity: 'archive', entityId: 0, field: 'toArchive', before: null, after: label, at: nowLocal() });
   });
@@ -372,7 +510,7 @@ async function countNumberOverlaps(purchases) {
 
 // Архив добавляется к текущим данным с новыми id, поставщики сопоставляются по имени.
 function mergeArchive({ tables }, label) {
-  return db.transaction('rw', [db.periods, db.advances, db.purchases, db.photos, db.suppliers, db.counters, db.auditLog], async () => {
+  return db.transaction('rw', [db.periods, db.advances, db.purchases, db.photos, db.suppliers, db.returns, db.repayments, db.counters, db.auditLog], async () => {
     const stripId = ({ id, ...record }) => record;
     const periodIds = new Map();
     for (const period of tables.periods) {
@@ -391,6 +529,10 @@ function mergeArchive({ tables }, label) {
       purchaseIds.set(purchase.id, await db.purchases.add({ ...stripId(purchase), periodId: periodIds.get(purchase.periodId), supplierId: supplierIds.get(purchase.supplierId) }));
     }
     for (const photo of tables.photos) await db.photos.add({ ...stripId(photo), purchaseId: purchaseIds.get(photo.purchaseId) });
+    for (const ret of tables.returns) await db.returns.add({ ...stripId(ret), periodId: periodIds.get(ret.periodId) });
+    for (const r of tables.repayments) {
+      await db.repayments.add({ ...stripId(r), periodId: periodIds.get(r.periodId), purchaseId: purchaseIds.get(r.purchaseId) });
+    }
     for (const entry of tables.auditLog) {
       const ids = entry.entity === 'period' ? periodIds : purchaseIds;
       await db.auditLog.add({ ...stripId(entry), entityId: ids.get(entry.entityId) });
@@ -408,7 +550,7 @@ function mergeArchive({ tables }, label) {
 // Чистый старт перед работой: всё учётное стирается, нумерация начинается заново.
 // ФИО, организация и базары остаются: это настройки, а не записи.
 function wipeRecords() {
-  const tables = [db.periods, db.advances, db.purchases, db.photos, db.suppliers, db.counters, db.auditLog];
+  const tables = [db.periods, db.advances, db.purchases, db.photos, db.suppliers, db.returns, db.repayments, db.counters, db.auditLog];
   return db.transaction('rw', [...tables, db.settings], async () => {
     await Promise.all(tables.map(table => table.clear()));
     await db.settings.delete('lastBackupAt');
@@ -421,13 +563,16 @@ function openNewPeriod() {
   return db.transaction('rw', db.periods, db.counters, () => ensureOpenPeriod(nowLocal().slice(0, 10)));
 }
 
+// Возврат при закрытии — такая же запись, как возврат в середине периода.
 function closePeriod(id, ret) {
-  return db.transaction('rw', db.periods, db.advances, db.purchases, db.auditLog, async () => {
+  return db.transaction('rw', [db.periods, db.advances, db.purchases, db.returns, db.repayments, db.auditLog], async () => {
     const period = await db.periods.get(id);
     if (period.status !== 'open') throw new Error('Период уже закрыт');
-    const { issued, spent } = await periodSummary(period);
-    if (ret > Math.max(issued - spent, 0)) throw new Error('Возврат больше остатка');
-    await applyChanges(db.periods, 'period', period, { status: 'closed', closed: nowLocal().slice(0, 10), ret });
+    const { balance } = await periodSummary(period);
+    if (ret > Math.max(balance, 0)) throw new LimitError(Math.max(balance, 0));
+    const dt = nowLocal();
+    if (ret) await db.returns.add({ periodId: id, dt, amount: ret, method: 'cash', to: 'Бухгалтерия', comment: 'При закрытии периода' });
+    await applyChanges(db.periods, 'period', period, { status: 'closed', closed: dt.slice(0, 10) });
   });
 }
 

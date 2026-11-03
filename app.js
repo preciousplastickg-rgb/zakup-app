@@ -2,11 +2,13 @@
 // Интерфейс: экраны, форма закупки и выдачи. Запись и расчёты — в db.js.
 
 const DOC = { ekkm: 'Чек ЭККМ', tov: 'Товарный чек', nakl: 'Накладная', esf: 'ЭСФ', none: 'Без документа' };
-const PAY = { cash: 'Наличные', transfer: 'Перевод' };
+const PAY = { cash: 'Наличные', transfer: 'Перевод', debt: 'В долг' };
+const MONEY_METHOD = { cash: 'Наличные', transfer: 'Перевод' };   // так отдают деньги: возврат, погашение долга
 const ADV_METHOD = { cash: 'Наличные', transfer: 'Перевод на карту' };
 const TYPES = { goods: 'Товар', service: 'Услуга' };
 const UNITS = ['шт', 'м', 'п.м.', 'м²', 'м³', 'кг', 'т', 'л', 'уп.', 'лист', 'меш.', 'рулон', 'рейс', 'час', 'услуга'];
-const VIEWS = ['home', 'new', 'done', 'card', 'search', 'adv', 'items', 'report', 'close', 'more', 'dict', 'restore', 'archive', 'unarchive', 'wipe', 'log'];
+const VIEWS = ['home', 'new', 'done', 'card', 'search', 'adv', 'items', 'report', 'close', 'more', 'dict', 'restore', 'archive', 'unarchive', 'wipe', 'log', 'list', 'supplier', 'entry', 'repay'];
+const PHOTO_VIEWS = ['card', 'items', 'supplier'];   // экраны со снимками из базы: ссылки на них живут, пока экран открыт
 const TABS = ['home', 'report', 'more'];
 const ANDROID = /Android/.test(navigator.userAgent);
 // Chrome на Android отклоняет эти файлы в «Поделиться», хотя canShare отвечает true.
@@ -69,11 +71,27 @@ let currentView = null;
 let viewSnapshot = '';
 let leaveWarnedAt = 0;
 let peek = null;         // пока соседний экран готовится к свайпу, show только запоминает его
-const listScroll = {};   // где был список, когда открыли карточку
 let backArmed = false;   // Android: есть запись в истории, которую заберёт системная кнопка «Назад»
 
+/* Переходы вглубь: «Должен» → поставщик → закупка. «Назад» возвращает на прошлый экран и на то же место списка. */
+const trail = [];        // { view, open, scroll }: экраны, с которых ушли вглубь
+let here = null;         // как заново открыть текущий экран
+let returning = null;    // запись trail, к которой идёт возврат; при свайпе он ещё может не состояться
+
+function drill(open) {
+  trail.push({ view: currentView, open: here, scroll: window.scrollY });
+  return open();
+}
+
+function goBack() {
+  const entry = trail[trail.length - 1];
+  if (!entry || !entry.open) return showHome();
+  returning = entry;
+  return entry.open();
+}
+
 // Чеки разбирают подряд: после карточки список остаётся там, где был.
-const restoredScroll = view => (currentView === 'card' && view === cardBack ? listScroll[view] || 0 : 0);
+const restoredScroll = view => (returning && returning.view === view ? returning.scroll : 0);
 
 // Значения полей экрана: по ним видно, ввёл ли человек что-то после открытия.
 function snapshotView(view) {
@@ -81,13 +99,18 @@ function snapshotView(view) {
   return fields.filter(f => (f.type === 'radio' || f.type === 'checkbox' ? f.checked : f.value)).map(f => `${f.id || f.name}=${f.value}`).join('|');
 }
 
-function show(view) {
+// reopen — как открыть этот экран заново, когда на него вернутся «Назад».
+function show(view, reopen = NAV[view]) {
   if (peek) {
     peek.view = view;
+    peek.reopen = reopen;
     return;
   }
   const scrollTop = restoredScroll(view);
-  if (view === 'card' && (currentView === 'home' || currentView === 'search')) listScroll[currentView] = window.scrollY;
+  if (returning && returning.view === view) trail.pop();
+  returning = null;
+  if (TABS.includes(view)) trail.length = 0;
+  here = reopen;
   VIEWS.forEach(v => { $('v-' + v).hidden = v !== view; });
   currentView = view;
   viewSnapshot = snapshotView(view);
@@ -95,7 +118,7 @@ function show(view) {
   $('toast').hidden = true;
   $('tabbar').hidden = !TABS.includes(view);
   document.querySelectorAll('.tab').forEach(t => t.setAttribute('aria-current', String(t.dataset.go === view)));
-  if (view !== 'card' && view !== 'items' && view !== 'dict') releaseViewPhotos();
+  if (!PHOTO_VIEWS.includes(view)) releaseViewPhotos();
   window.scrollTo(0, scrollTop);
   if (view !== 'home') armSystemBack();
 }
@@ -111,7 +134,24 @@ async function showHome() {
   show('home');
 }
 
-const NAV = { home: showHome, report: () => showReport(), more: showMore, card: () => openCard(cardId), search: () => openSearch() };
+const NAV = { home: showHome, report: () => showReport(), more: showMore, card: () => openCard(cardId), search: () => openSearch(), back: goBack };
+
+// Строка списка с data-open="вид:id" открывает свою карточку, а «Назад» вернёт к списку.
+const OPEN = {
+  card: id => openCard(id),
+  advance: id => openEntry('advance', id),
+  return: id => openEntry('return', id),
+  repayment: id => openEntry('repayment', id),
+  supplier: id => openSupplier(id),
+  period: id => showReport(id),
+};
+
+document.addEventListener('click', e => {
+  const target = e.target.closest('[data-open]');
+  if (!target) return;
+  const [kind, id] = target.dataset.open.split(':');
+  drill(() => OPEN[kind](Number(id)));
+});
 
 function hasUnsavedInput() {
   return viewSnapshot !== snapshotView(currentView) || (currentView === 'new' && form.photoJobs.length > 0);
@@ -176,6 +216,7 @@ async function prepareTarget(d) {
   try {
     await NAV[d.go]();
     d.view = peek.view;
+    d.reopen = peek.reopen;
   } catch (err) {
     console.error(err);
     return;
@@ -200,10 +241,13 @@ async function prepareTarget(d) {
 function beginDrag(dx) {
   const dir = Math.sign(dx);
   const section = $('v-' + currentView);
+  let go = swipeGoal(dir);
+  // Экран того же вида нельзя заранее поставить рядом: он один. Остаётся кнопка «Назад».
+  if (go === 'back' && trail.length && trail[trail.length - 1].view === currentView) go = null;
   drag = {
     dir,
     section,
-    go: swipeGoal(dir),
+    go,
     guarded: !TABS.includes(currentView) && leaveGuarded(),
     box: section.getBoundingClientRect(),
     width: window.innerWidth,
@@ -216,6 +260,7 @@ function beginDrag(dx) {
     frame: 0,
     released: false,
     view: null,
+    reopen: null,
     target: null,
     bar: null,
     ready: Promise.resolve(),
@@ -245,8 +290,11 @@ function finishDrag(d, commit) {
     d.target.hidden = !commit;
   }
   drag = null;
-  if (commit) show(d.view);
-  else $('tabbar').hidden = !TABS.includes(currentView);
+  if (commit) show(d.view, d.reopen);
+  else {
+    returning = null;
+    $('tabbar').hidden = !TABS.includes(currentView);
+  }
 }
 
 async function releaseDrag(d, lifted) {
@@ -322,41 +370,84 @@ document.addEventListener('visibilitychange', () => {
 
 /* Главная */
 
+const methodTag = method => `<span class="tag adv">${method === 'cash' ? 'нал' : 'перевод'}</span>`;
+
 function renderOperation({ kind, x }) {
   if (kind === 'advance') {
-    const tag = x.method === 'cash' ? 'нал' : 'перевод';
-    return `<button class="item" type="button" data-advance="${x.id}"><span class="no">${dShort(x.date)}</span><span class="body"><span class="t">Выдача аванса<span class="tag adv">${tag}</span></span><span class="s">${esc(x.by)}</span></span><span class="a good">+${money(x.amount)}</span></button>`;
+    return `<button class="item" type="button" data-open="advance:${x.id}"><span class="no">${dShort(x.date)}</span><span class="body"><span class="t">Выдача аванса${methodTag(x.method)}</span><span class="s">${esc(x.by)}</span></span><span class="a good">+${money(x.amount)}</span></button>`;
+  }
+  if (kind === 'return') {
+    return `<button class="item" type="button" data-open="return:${x.id}"><span class="no">${dShort(x.dt)}</span><span class="body"><span class="t">Возврат денег${methodTag(x.method)}</span><span class="s">${esc(x.to)}</span></span><span class="a">−${money(x.amount)}</span></button>`;
+  }
+  if (kind === 'repayment') {
+    return `<button class="item" type="button" data-open="repayment:${x.id}"><span class="no">${dShort(x.dt)}</span><span class="body"><span class="t">Погашение долга${methodTag(x.method)}</span><span class="s">${esc(x.supplierName)}${x.no ? ` · за №${pad3(x.no)}` : ''}</span></span><span class="a">−${money(x.amount)}</span></button>`;
   }
   const storno = x.status === 'storno';
   const noDoc = x.docType === 'none';
   // Метки идут первыми: длинное имя поставщика не должно вытеснять их за многоточие.
   const tags = (x.type === 'service' ? '<span class="tag adv">услуга</span>' : '') +
-    (storno ? '<span class="tag bad">сторно</span>' : noDoc ? '<span class="tag warn">нет документа</span>' : '');
+    (storno ? '<span class="tag bad">сторно</span>' : noDoc ? '<span class="tag warn">нет документа</span>' : '') +
+    (debtOf(x) ? '<span class="tag warn">в долг</span>' : '');
   const doc = storno || noDoc ? '' : ` · ${DOC[x.docType]}`;
   const noItems = x.noItems ? '<br><span class="tag warn">без позиций</span>' : '';
-  return `<button class="item${storno ? ' storno' : ''}" type="button" data-card="${x.id}"><span class="no">№${pad3(x.no)}<br>${dShort(x.dt)}</span><span class="body"><span class="t">${esc(purchaseTitle(x) || x.supplierName)}</span><span class="s">${tags}${tags ? ' ' : ''}${esc(x.supplierName)}${doc}</span></span><span class="a">−${money(x.amount)}${noItems}</span></button>`;
+  return `<button class="item${storno ? ' storno' : ''}" type="button" data-open="card:${x.id}"><span class="no">№${pad3(x.no)}<br>${dShort(x.dt)}</span><span class="body"><span class="t">${esc(purchaseTitle(x) || x.supplierName)}</span><span class="s">${tags}${tags ? ' ' : ''}${esc(x.supplierName)}${doc}</span></span><span class="a">−${money(x.amount)}${noItems}</span></button>`;
 }
 
+const supplierNames = async () => new Map((await db.suppliers.toArray()).map(s => [s.id, s.name]));
+
+// Строки списка операций: закупки с именем поставщика, погашения — с закупкой, за которую заплачено.
+async function purchaseOps(purchases, extra = () => ({})) {
+  const names = await supplierNames();
+  return purchases.map(p => ({ kind: 'purchase', at: p.dt, x: { ...p, supplierName: names.get(p.supplierId), ...extra(p) } }));
+}
+
+async function repaymentOps(repayments) {
+  const [names, purchases] = await Promise.all([supplierNames(), db.purchases.bulkGet([...new Set(repayments.map(r => r.purchaseId))])]);
+  const byId = new Map(purchases.filter(Boolean).map(p => [p.id, p]));
+  return repayments.map(r => {
+    const p = byId.get(r.purchaseId);
+    return { kind: 'repayment', at: r.dt, x: { ...r, no: p ? p.no : 0, supplierName: p ? names.get(p.supplierId) : 'Закупка в архиве' } };
+  });
+}
+
+const advanceOps = advances => advances.map(a => ({ kind: 'advance', at: a.date + 'T00:00', x: a }));
+const returnOps = returns => returns.map(r => ({ kind: 'return', at: r.dt, x: r }));
+const sortOps = ops => ops.sort((a, b) => b.at.localeCompare(a.at) || b.x.id - a.x.id);
+
 let homeNoItems = false;   // на главной показаны только закупки без позиций
+let homePeriodId = null;   // период плашки: её цифры раскрываются списками
+
+// Цифры плашки нажимаются: за каждой — список записей, из которых она сложилась.
+function renderPlate(sum, debt) {
+  const cell = (key, label, value, cls = '') =>
+    `<button type="button" data-sum="${key}"><span class="label">${label}<span class="chev">›</span></span><b class="${cls}">${money(value)}</b></button>`;
+  const cells = [
+    cell('issued', 'Выдано', sum.issued),
+    cell('spent', 'Израсходовано', sum.spent),
+    ...(sum.returned ? [cell('returned', 'Возвращено', sum.returned)] : []),
+    cell('debts', 'Должен', debt, debt ? 'debt' : ''),
+  ];
+  $('h-meta').innerHTML = cells.join('');
+}
 
 async function renderHome() {
   const period = await getCurrentPeriod();
   const closed = !!period && period.status === 'closed';
   const sum = await periodSummary(period);
-  const suppliers = new Map((await db.suppliers.toArray()).map(s => [s.id, s.name]));
+  const debts = await getDebts();
+  homePeriodId = period ? period.id : null;
 
   $('h-org').textContent = await getSetting('org');
   $('h-date').textContent = dFull(nowLocal());
   $('h-period').textContent = period ? period.number + (closed ? ' · закрыт' : '') : 'Период не открыт';
   $('b-newp').hidden = !closed;
   $('h-actions').hidden = closed;
-  $('h-bal').innerHTML = `${money(sum.balance)}<small>сом</small>`;
+  $('h-bal').innerHTML = `${money(sum.balance)}<small>сом</small><span class="chev">›</span>`;
   $('h-bal').classList.toggle('neg', sum.balance < 0);
-  $('h-in').textContent = money(sum.issued);
-  $('h-out').textContent = money(sum.spent);
+  renderPlate(sum, sumLeft(debts));
 
   const notes = [];
-  if (closed) notes.push(`<div class="note warn"><span>Период закрыт ${dFull(period.closed)}. Возврат в кассу: <b class="num">${money(period.ret)} сом</b>.${sum.balance > 0 ? ` На руках осталось <b class="num">${money(sum.balance)} сом</b>, в новый период этот остаток не перейдёт.` : ''}</span></div>`);
+  if (closed) notes.push(`<div class="note warn"><span>Период закрыт ${dFull(period.closed)}. Возврат в кассу: <b class="num">${money(sum.returned)} сом</b>.${sum.balance > 0 ? ` На руках осталось <b class="num">${money(sum.balance)} сом</b>, в новый период этот остаток не перейдёт.` : ''}</span></div>`);
   if (sum.balance < 0) notes.push(`<div class="note bad"><span>Перерасход <b class="num">${money(-sum.balance)} сом</b>. Будет отражён в отчёте отдельной строкой.</span></div>`);
   if (sum.noDoc > 0) notes.push(`<div class="note warn"><span>Без документов: <b class="num">${money(sum.noDoc)} сом</b>. Бухгалтерия может не принять эти расходы.</span></div>`);
   const reminder = await backupReminder();
@@ -368,13 +459,10 @@ async function renderHome() {
   const needsItems = p => !closed && p.status === 'active' && !p.items.length;
   const noItemsCount = sum.purchases.filter(needsItems).length;
   if (!noItemsCount) homeNoItems = false;
-  const operations = [
-    ...sum.purchases.filter(p => !homeNoItems || needsItems(p)).map(p => ({
-      kind: 'purchase', at: p.dt,
-      x: { ...p, supplierName: suppliers.get(p.supplierId), noItems: needsItems(p) },
-    })),
-    ...(homeNoItems ? [] : sum.advances.map(a => ({ kind: 'advance', at: a.date + 'T00:00', x: a }))),
-  ].sort((a, b) => b.at.localeCompare(a.at) || b.x.id - a.x.id);
+  const operations = sortOps([
+    ...await purchaseOps(sum.purchases.filter(p => !homeNoItems || needsItems(p)), p => ({ noItems: needsItems(p) })),
+    ...(homeNoItems ? [] : [...advanceOps(sum.advances), ...returnOps(sum.returns), ...await repaymentOps(sum.repayments)]),
+  ]);
 
   $('h-count').textContent = `${sum.count} ${plural(sum.count, 'закупка', 'закупки', 'закупок')}`;
   $('h-filter').hidden = !noItemsCount;
@@ -389,20 +477,23 @@ $('h-filter').onclick = () => {
   renderHome();
 };
 $('b-new').onclick = () => openNew();
-$('b-adv').onclick = openAdvance;
+$('b-adv').onclick = () => openAdvance('advance');
+$('b-ret').onclick = () => openAdvance('return');
+$('h-meta').addEventListener('click', e => {
+  const b = e.target.closest('[data-sum]');
+  if (b) drill(() => openList(SUM_LISTS[b.dataset.sum](homePeriodId)));
+});
+// Остаток раскрывается расчётом: из чего он сложился, по строкам.
+$('h-bal').onclick = () => {
+  if (!homePeriodId) return;
+  reportView = 'sum';
+  showReport(homePeriodId);
+};
 $('b-newp').onclick = async () => {
   await openNewPeriod();
   await showHome();
   toast('Открыт новый период. Добавьте выдачу аванса.');
 };
-$('h-list').addEventListener('click', e => {
-  const advance = e.target.closest('[data-advance]');
-  if (advance) openAdvanceCard(Number(advance.dataset.advance));
-  const b = e.target.closest('[data-card]');
-  if (!b) return;
-  cardBack = 'home';
-  openCard(Number(b.dataset.card));
-});
 
 /* Новая закупка */
 
@@ -416,6 +507,7 @@ const form = {
   autoPhone: '',      // телефон, подставленный от поставщика: при смене имени он снимается
   dateRange: null,    // [от, до] для даты закупки в режиме правки
   editing: null,      // закупка в режиме правки, null для новой
+  repaid: 0,          // сколько уже погашено по закупке в правке: долг не может стать меньше
   session: {},        // новая форма — новый объект: по нему отсекается фото, дожатое для прошлой формы
   receipts: [],       // [{ blob, url }]
   goods: [],          // [{ blob, url }]
@@ -527,18 +619,20 @@ function fillForm({ editing, no, balance, bazaars, suppliers, history, place, ty
   const itemized = !!editing && editing.items.length > 0;
   $('f-amount').readOnly = itemized;
   $('f-amount-hint').hidden = !itemized;
-  ['f-name', 'f-amount', 'f-supplier', 'f-phone', 'f-comment', 'f-date'].forEach(id => { $(id).value = ''; });
+  ['f-name', 'f-amount', 'f-paid', 'f-supplier', 'f-phone', 'f-comment', 'f-date'].forEach(id => { $(id).value = ''; });
   $('f-place-new').hidden = true;
   $('f-place-add').hidden = false;
   renderPlaces(place);
   chips($('f-type'), 'type', Object.entries(TYPES), type);
   applyPurchaseType();
   chips($('f-doc'), 'doc', Object.entries(DOC), docType, 'none');
-  chips($('f-pay'), 'pay', Object.entries(PAY), payment);
+  chips($('f-pay'), 'pay', Object.entries(PAY), payment, 'debt');
+  applyPayment();
 }
 
 // prefill — кнопки «Ещё у этого поставщика» и «Повторить закупку»: остаётся ввести только сумму.
 async function openNew(prefill = null) {
+  form.repaid = 0;
   const [no, sum, last, place, bazaars, suppliers, history] = await Promise.all([
     peekPurchaseNo(),
     getOpenPeriod().then(periodSummary),
@@ -558,7 +652,8 @@ async function openNew(prefill = null) {
     place,
     type: prefill ? prefill.type : 'goods',
     docType: last ? last.docType : 'ekkm',
-    payment: last ? last.payment : 'cash',
+    // В долг берут по договорённости, а не по привычке: это выбирают каждый раз сами.
+    payment: last && last.payment !== 'debt' ? last.payment : 'cash',
   });
   if (prefill) {
     $('f-name').value = prefill.goodsName || '';
@@ -571,17 +666,19 @@ async function openNew(prefill = null) {
 async function openEdit(id) {
   const x = await db.purchases.get(id);
   const period = await db.periods.get(x.periodId);
-  const [sum, bazaars, suppliers, supplier, history] = await Promise.all([
+  const [sum, bazaars, suppliers, supplier, history, repaid] = await Promise.all([
     periodSummary(period),
     db.bazaars.toArray(),
     db.suppliers.toArray(),
     db.suppliers.get(x.supplierId),
     getRecentPurchases(),
+    repaidFor(id),
   ]);
+  form.repaid = repaid;
   fillForm({
     editing: x,
     no: x.no,
-    balance: sum.balance + x.amount,
+    balance: sum.balance + x.amount - debtOf(x),
     bazaars,
     suppliers,
     history,
@@ -592,6 +689,7 @@ async function openEdit(id) {
   });
   $('f-name').value = x.goodsName;
   $('f-amount').value = money(x.amount);
+  if (x.payment === 'debt') $('f-paid').value = x.paidNow ? money(x.paidNow) : '';
   $('f-supplier').value = supplier.name;
   $('f-phone').value = supplier.phone;
   form.autoPhone = supplier.phone;
@@ -604,7 +702,7 @@ async function openEdit(id) {
   [$('f-date').min, $('f-date').max] = form.dateRange;
   $('f-date').value = x.dt.slice(0, 10);
   updateSuggestions();
-  updateOverspendNote();
+  applyPayment();
   show('new');
 }
 
@@ -678,14 +776,32 @@ function queuePhotos(kind, files) {
   renderPhotos(kind);
 }));
 
+// Из аванса уходит только оплаченное сразу. Пустое поле — всё в долг.
+function formPaidNow() {
+  if (radioVal('pay') !== 'debt') return parseMoney($('f-amount').value) || 0;
+  return parseMoney($('f-paid').value) || 0;
+}
+
 function updateOverspendNote() {
   const amount = parseMoney($('f-amount').value) || 0;
-  const over = amount - form.balance;
+  const over = formPaidNow() - form.balance;
   $('f-over').innerHTML = amount > 0 && over > 0
-    ? `<div class="note bad"><span>Сумма больше остатка. Перерасход составит <b class="num">${money(over)} сом</b>, сохранить можно.</span></div>`
+    ? `<div class="note bad"><span>${radioVal('pay') === 'debt' ? 'Оплаченное сразу' : 'Сумма'} больше остатка. Перерасход составит <b class="num">${money(over)} сом</b>, сохранить можно.</span></div>`
     : '';
+  const debt = amount - formPaidNow();
+  $('f-debt-hint').textContent = amount && debt > 0
+    ? `Долг поставщику: ${money(debt)} сом. В остаток аванса он не входит, погасить можно позже из карточки или со страницы поставщика.`
+    : 'Остальное будет долгом поставщику. В остаток аванса он не входит.';
 }
+
+function applyPayment() {
+  $('f-paid-field').hidden = radioVal('pay') !== 'debt';
+  updateOverspendNote();
+}
+
 $('f-amount').addEventListener('input', updateOverspendNote);
+$('f-paid').addEventListener('input', updateOverspendNote);
+$('f-pay').addEventListener('change', applyPayment);
 
 /* Подсказки: повторы вводятся одним касанием и без клавиатуры. */
 
@@ -737,8 +853,9 @@ function applySupplierDefaults(name) {
   if (!last || form.editing) return;
   const doc = radioVal('doc');
   if (!form.touched.doc) setRadio('doc', last.docType);
-  if (!form.touched.pay) setRadio('pay', last.payment);
+  if (!form.touched.pay && last.payment !== 'debt') setRadio('pay', last.payment);
   if (radioVal('doc') !== doc) resetNoDocConfirm();
+  applyPayment();
 }
 
 // Телефон прошлого поставщика не должен достаться новому. Введённый вручную остаётся.
@@ -850,6 +967,20 @@ async function submitPurchase() {
   if (!goodsName) { toast(`Укажите наименование ${service ? 'услуги' : 'товара'}.`); $('f-name').focus(); return; }
   if (!supplierName) { toast(`Укажите ${service ? 'исполнителя' : 'поставщика'}.`); $('f-supplier').focus(); return; }
   if (!amount) { toast('Введите сумму закупки.'); $('f-amount').focus(); return; }
+  const payment = radioVal('pay');
+  const paidNow = payment === 'debt' ? parseMoney($('f-paid').value || '0') : 0;
+  if (paidNow === null) { toast('Введите, сколько оплачено сразу, или оставьте поле пустым.'); $('f-paid').focus(); return; }
+  if (payment === 'debt' && paidNow >= amount) {
+    toast('Оплачено всё: выберите «Наличные» или «Перевод».');
+    $('f-paid').focus();
+    return;
+  }
+  // Сумма с позициями в правке не меняется, долг считается от неё.
+  const finalAmount = form.editing && form.editing.items.length ? form.editing.amount : amount;
+  if (form.repaid && (payment !== 'debt' || finalAmount - paidNow < form.repaid)) {
+    toast(`По этой закупке уже погашено ${money(form.repaid)} сом: долг не может быть меньше. Сначала удалите лишние погашения.`, 6000);
+    return;
+  }
   const date = $('f-date').value;
   if (form.editing && (!date || date < form.dateRange[0] || date > form.dateRange[1])) {
     toast(`Дата должна быть от ${dFull(form.dateRange[0])} до ${dFull(form.dateRange[1])}.`);
@@ -866,11 +997,12 @@ async function submitPurchase() {
     type,
     goodsName,
     amount,
+    paidNow,
     supplierName,
     phone: $('f-phone').value.trim(),
     place: service ? '' : radioVal('place') || '',
     docType,
-    payment: radioVal('pay'),
+    payment,
     comment: $('f-comment').value.trim(),
   };
 
@@ -906,7 +1038,10 @@ async function submitPurchase() {
   form.lastSaved = { type, supplierName };
   const { balance } = await periodSummary(await db.periods.get(saved.periodId));
   $('d-no').textContent = pad3(saved.no);
-  $('d-sum').innerHTML = `<span class="num">${money(amount)}</span> сом · ${esc(supplierName)}<br>Остаток: <span class="num">${money(balance)}</span> сом${balance < 0 ? ' (перерасход)' : ''}`;
+  const debt = payment === 'debt' ? amount - paidNow : 0;
+  $('d-sum').innerHTML = `<span class="num">${money(amount)}</span> сом · ${esc(supplierName)}` +
+    (debt ? `<br>В долг: <span class="num">${money(debt)}</span> сом` : '') +
+    `<br>Остаток: <span class="num">${money(balance)}</span> сом${balance < 0 ? ' (перерасход)' : ''}`;
   show('done');
 }
 
@@ -918,7 +1053,7 @@ $('d-same').onclick = () => openNew(form.lastSaved);
 
 const AUDIT_FIELDS = {
   type: 'Тип', goodsName: 'Наименование', dt: 'Дата', amount: 'Сумма', supplierId: 'Поставщик', place: 'Базар', purposeId: 'Назначение', docType: 'Документ',
-  payment: 'Оплата', comment: 'Комментарий', items: 'Позиции', status: 'Статус', stornoReason: 'Причина сторно',
+  payment: 'Оплата', paidNow: 'Оплачено сразу', comment: 'Комментарий', items: 'Позиции', status: 'Статус', stornoReason: 'Причина сторно',
   name: 'Название', phone: 'Телефон', archived: 'В архиве', active: 'Действует',
   photoAdded: 'Добавлено фото', photoDeleted: 'Удалено фото', deleted: 'Удалена запись', toArchive: 'В архив', fromArchive: 'Из архива',
   ret: 'Возврат', closed: 'Дата закрытия', revision: 'Редакция', reopenReason: 'Причина переоткрытия',
@@ -940,7 +1075,7 @@ async function auditContext() {
 function auditValue(field, value, ctx) {
   if (value === null || value === undefined || value === '') return '—';
   switch (field) {
-    case 'amount': case 'ret': return `${money(value)} сом`;
+    case 'amount': case 'ret': case 'paidNow': return `${money(value)} сом`;
     case 'closed': case 'dt': return dFull(value);
     case 'supplierId': return ctx.suppliers.get(value);
     case 'purposeId': return ctx.purposes.get(value);
@@ -957,6 +1092,8 @@ function auditValue(field, value, ctx) {
 function auditSubject(e, ctx) {
   if (e.entity === 'archive') return 'Архив';
   if (e.entity === 'advance') return 'Выдача аванса';
+  if (e.entity === 'return') return 'Возврат денег';
+  if (e.entity === 'repayment') return 'Погашение долга';
   if (e.entity === 'purchase') {
     const purchase = ctx.purchases.get(e.entityId);
     return purchase ? `Закупка №${pad3(purchase.no)}` : 'Закупка (удалена)';
@@ -985,7 +1122,6 @@ $('s-log').onclick = openLog;
 /* Карточка закупки */
 
 let cardId = null;
-let cardBack = 'home';   // куда возвращается «Назад»: на главную или к результатам поиска
 let viewPhotoUrls = [];
 let stornoSaving = false;
 
@@ -1013,15 +1149,15 @@ function renderItemsTable(x) {
 async function openCard(id, next = null) {
   cardId = id;
   const x = await db.purchases.get(id);
-  const [supplier, period, photos, history, ctx] = await Promise.all([
+  const [supplier, period, photos, history, ctx, repayments] = await Promise.all([
     db.suppliers.get(x.supplierId),
     db.periods.get(x.periodId),
     db.photos.where('purchaseId').equals(id).toArray(),
     db.auditLog.where('entityId').equals(id).filter(e => e.entity === 'purchase').toArray(),
     auditContext(),
+    db.repayments.where('purchaseId').equals(id).toArray(),
   ]);
   releaseViewPhotos();
-  $('c-back').dataset.go = cardBack;
   const shots = photos.map(p => ({ id: p.id, kind: p.kind, url: viewPhotoUrl(p.blob) }));
   const receipts = shots.filter(p => p.kind === 'receipt');
   const goods = shots.filter(p => p.kind === 'goods');
@@ -1029,9 +1165,11 @@ async function openCard(id, next = null) {
   const storno = x.status === 'storno';
   const editable = !storno && period.status === 'open';
   const service = x.type === 'service';
+  // Деньги за закупку уже у поставщика: сторно и удаление только после удаления погашений.
+  const locked = repayments.length > 0;
 
   const row = (dt, dd) => `<div><dt>${dt}</dt><dd>${dd}</dd></div>`;
-  const badge = storno ? '<span class="tag bad">сторно</span>' : x.docType === 'none' ? '<span class="tag warn">нет документа</span>' : '';
+  const badge = storno ? '<span class="tag bad">сторно</span>' : x.docType === 'none' ? '<span class="tag warn">нет документа</span>' : debtOf(x) ? '<span class="tag warn">в долг</span>' : '';
   $('c-title').innerHTML = `Закупка <span class="num">№${pad3(x.no)}</span>`;
   $('c-body').innerHTML =
     (next ? `<button class="btn primary full" type="button" id="c-next">Следующая без позиций: №${pad3(next.purchase.no)} (осталось ${next.left})</button>` : '') +
@@ -1040,15 +1178,16 @@ async function openCard(id, next = null) {
     '<dl class="kv">' +
     row('Дата', `<span class="tnum">${dFull(x.dt)}, ${x.dt.slice(11, 16)}</span>`) +
     (purchaseTitle(x) ? row(service ? 'Услуга' : 'Товар', esc(purchaseTitle(x))) : '') +
-    row(service ? 'Исполнитель' : 'Поставщик', esc(supplier.name)) +
-    (supplier.phone ? row('Телефон', esc(supplier.phone)) : '') +
+    linkRow(service ? 'Исполнитель' : 'Поставщик', esc(supplier.name), `supplier:${supplier.id}`) +
+    (supplier.phone ? row('Телефон', telLink(supplier.phone)) : '') +
     (x.place ? row('Базар', esc(x.place)) : '') +
     row('Документ', DOC[x.docType]) +
     row('Оплата', PAY[x.payment]) +
-    row('Период', esc(period.number)) +
+    linkRow('Период', esc(period.number), `period:${period.id}`) +
     (x.comment ? row('Комментарий', esc(x.comment)) : '') +
     '</dl>' +
     (editable ? '<div class="btn-row"><button class="btn primary" type="button" id="c-items">Позиции</button><button class="btn" type="button" id="c-edit">Изменить</button></div><button class="btn full" type="button" id="c-repeat">Повторить закупку</button>' : '') +
+    (debtOf(x) ? await renderDebtBlock(x, repayments) : '') +
     '<div class="section-h"><h3>Позиции</h3></div>' +
     (x.items.length ? renderItemsTable(x) : '<div class="ph-none"><span>Позиции не внесены.</span></div>') +
     '<div class="section-h"><h3>Фото документа</h3></div>' +
@@ -1065,13 +1204,16 @@ async function openCard(id, next = null) {
     (history.length
       ? `<div class="section-h"><h3>История изменений</h3></div><div class="list">${history.map(e => renderAudit(e, ctx, false)).join('')}</div>`
       : '') +
-    (editable ? '<div id="c-storno" class="stack"><button class="btn danger full" type="button" id="c-st-open">Сторнировать</button></div>' : '') +
-    (period.status === 'open' ? '<button class="btn danger full" type="button" id="c-delete"></button>' : '<p class="muted hint">Чтобы изменить или удалить запись закрытого периода, сначала переоткройте его в Отчёте.</p>');
+    (locked && period.status === 'open' ? '<p class="muted hint">По закупке есть погашения долга. Чтобы сторнировать или удалить её, сначала удалите погашения.</p>' : '') +
+    (editable && !locked ? '<div id="c-storno" class="stack"><button class="btn danger full" type="button" id="c-st-open">Сторнировать</button></div>' : '') +
+    (period.status !== 'open' ? '<p class="muted hint">Чтобы изменить или удалить запись закрытого периода, сначала переоткройте его в Отчёте.</p>' : locked ? '' : '<button class="btn danger full" type="button" id="c-delete"></button>');
+  const repay = $('c-repay');
+  if (repay) repay.onclick = () => drill(() => openRepay([id]));
   if (editable) {
     $('c-items').onclick = () => openItems(id);
     $('c-edit').onclick = () => openEdit(id);
     $('c-repeat').onclick = () => openNew({ type: x.type, goodsName: x.goodsName, supplierName: supplier.name });
-    $('c-st-open').onclick = () => openStorno(x);
+    if (!locked) $('c-st-open').onclick = () => openStorno(x);
     $('c-add-receipt').onchange = e => addCardPhotos(id, 'receipt', e.target);
     $('c-add-goods').onchange = e => addCardPhotos(id, 'goods', e.target);
     $('c-add-supplier').onchange = e => addCardPhotos(id, 'supplier', e.target);
@@ -1089,14 +1231,34 @@ async function openCard(id, next = null) {
       openItems(next.purchase.id);
     };
   }
-  if (period.status === 'open') {
+  if (period.status === 'open' && !locked) {
     confirmTwice($('c-delete'), 'Удалить запись', `Нажмите ещё раз: удалить №${pad3(x.no)} насовсем`, async () => {
       await deletePurchase(id);
-      await NAV[cardBack]();
+      await goBack();
       toast(`Закупка №${pad3(x.no)} удалена. Этот номер больше не выдаётся.`);
     });
   }
-  show('card');
+  show('card', () => openCard(id));
+}
+
+// Строка карточки, которая открывает связанный экран.
+const linkRow = (dt, dd, open) => `<div class="link" role="button" tabindex="0" data-open="${open}"><dt>${dt}</dt><dd>${dd}<span class="chev">›</span></dd></div>`;
+const telLink = phone => `<a href="tel:${esc(phone.replace(/[^\d+]/g, ''))}">${esc(phone)}</a>`;
+
+// Сколько взято в долг, сколько отдано и чем. Погасить можно и в закрытом периоде закупки: деньги идут из текущего.
+async function renderDebtBlock(x, repayments) {
+  const repaid = sumAmounts(repayments);
+  const left = debtOf(x) - repaid;
+  const line = (label, value, cls = '') => `<div class="${cls}"><span>${label}</span><span class="v">${money(value)}</span></div>`;
+  return '<div class="section-h"><h3>Долг поставщику</h3></div>' +
+    '<div class="sum">' +
+    line('Взято в долг', debtOf(x)) +
+    (x.paidNow ? line('Оплачено сразу', x.paidNow) : '') +
+    line('Погашено', repaid) +
+    line(left ? 'Осталось отдать' : 'Долг погашен', left, 'total') +
+    '</div>' +
+    (repayments.length ? `<div class="list">${sortOps(await repaymentOps(repayments)).map(renderOperation).join('')}</div>` : '') +
+    (left > 0 ? '<button class="btn primary full" type="button" id="c-repay">Погасить долг</button>' : '');
 }
 
 function shotHtml(shot, alt, editable) {
@@ -1135,30 +1297,46 @@ async function addCardPhotos(id, kind, input) {
   toast(blobs.length > 1 ? `Добавлено фото: ${blobs.length}` : 'Фото добавлено');
 }
 
-async function openAdvanceCard(id) {
-  const x = await db.advances.get(id);
+/* Выдача, возврат и погашение: короткая карточка с удалением, пока период открыт */
+
+const ENTRY = {
+  advance: { table: () => db.advances, title: 'Выдача аванса', what: 'выдачу', remove: deleteAdvance, done: 'Выдача удалена' },
+  return: { table: () => db.returns, title: 'Возврат денег', what: 'возврат', remove: deleteReturn, done: 'Возврат удалён' },
+  repayment: { table: () => db.repayments, title: 'Погашение долга', what: 'погашение', remove: deleteRepayment, done: 'Погашение удалено, долг снова числится' },
+};
+
+async function openEntry(kind, id) {
+  const spec = ENTRY[kind];
+  const x = await spec.table().get(id);
   const period = await db.periods.get(x.periodId);
   const row = (dt, dd) => `<div><dt>${dt}</dt><dd>${dd}</dd></div>`;
-  releaseViewPhotos();
-  $('c-back').dataset.go = 'home';
-  $('c-title').textContent = 'Выдача аванса';
-  $('c-body').innerHTML =
+  let rows = '';
+  if (kind === 'advance') rows = row('Дата', dFull(x.date)) + row('Способ', ADV_METHOD[x.method]) + row('Кто выдал', esc(x.by));
+  if (kind === 'return') rows = row('Дата', dFull(x.dt)) + row('Способ', MONEY_METHOD[x.method]) + row('Кому', esc(x.to));
+  if (kind === 'repayment') {
+    const purchase = await db.purchases.get(x.purchaseId);
+    const supplier = purchase && await db.suppliers.get(purchase.supplierId);
+    rows = row('Дата', dFull(x.dt)) + row('Способ', MONEY_METHOD[x.method]) +
+      (purchase
+        ? linkRow('Поставщик', esc(supplier.name), `supplier:${supplier.id}`) + linkRow('За закупку', `№${pad3(purchase.no)} от ${dFull(purchase.dt)}`, `card:${purchase.id}`)
+        : row('За закупку', 'убрана в архив'));
+  }
+  $('e-title').textContent = spec.title;
+  $('e-body').innerHTML =
     `<div class="row"><span class="amount-hero">${money(x.amount)} сом</span></div>` +
-    '<dl class="kv">' +
-    row('Дата', dFull(x.date)) +
-    row('Способ', ADV_METHOD[x.method]) +
-    row('Кто выдал', esc(x.by)) +
-    row('Период', esc(period.number)) +
+    '<dl class="kv">' + rows +
+    linkRow('Период', esc(period.number), `period:${period.id}`) +
+    (x.comment ? row('Комментарий', esc(x.comment)) : '') +
     '</dl>' +
-    (period.status === 'open' ? '<button class="btn danger full" type="button" id="c-delete"></button>' : '');
+    (period.status === 'open' ? '<button class="btn danger full" type="button" id="e-delete"></button>' : '');
   if (period.status === 'open') {
-    confirmTwice($('c-delete'), 'Удалить запись', 'Нажмите ещё раз: удалить выдачу насовсем', async () => {
-      await deleteAdvance(id);
-      await showHome();
-      toast('Выдача удалена');
+    confirmTwice($('e-delete'), 'Удалить запись', `Нажмите ещё раз: удалить ${spec.what} насовсем`, async () => {
+      await spec.remove(id);
+      await goBack();
+      toast(spec.done);
     });
   }
-  show('card');
+  show('entry', () => openEntry(kind, id));
 }
 
 function openStorno(x) {
@@ -1176,7 +1354,7 @@ function openStorno(x) {
       await stornoPurchase(x.id, reason);
     } catch (err) {
       console.error(err);
-      toast('Сторно не сохранилось. Попробуйте ещё раз.');
+      toast(err instanceof HasRepaymentsError ? 'По закупке есть погашения долга. Сначала удалите их.' : 'Сторно не сохранилось. Попробуйте ещё раз.');
       return;
     } finally {
       stornoSaving = false;
@@ -1188,7 +1366,7 @@ function openStorno(x) {
 
 /* Позиции. Вносятся после рынка, по чеку, в уже сохранённую закупку. */
 
-const itemsForm = { purchase: null, balance: 0, known: new Map(), armedAt: 0, saving: false };
+const itemsForm = { purchase: null, balance: 0, repaid: 0, known: new Map(), armedAt: 0, saving: false };
 
 // Каждое наименование один раз, с последней ценой и единицей: вечером это главная экономия времени.
 function knownItems(history) {
@@ -1208,14 +1386,16 @@ function updateItemSuggest(row) {
 
 async function openItems(id) {
   const purchase = await db.purchases.get(id);
-  const [sum, receipt, history] = await Promise.all([
+  const [sum, receipt, history, repaid] = await Promise.all([
     db.periods.get(purchase.periodId).then(periodSummary),
     db.photos.where('purchaseId').equals(id).filter(p => p.kind === 'receipt').first(),
     getRecentPurchases(),
+    repaidFor(id),
   ]);
   releaseViewPhotos();
   itemsForm.purchase = purchase;
   itemsForm.balance = sum.balance;
+  itemsForm.repaid = repaid;
   itemsForm.known = knownItems(history);
   $('i-no').textContent = '№' + pad3(purchase.no);
   $('i-receipt').hidden = !receipt;
@@ -1271,11 +1451,13 @@ function updateItemsTotals() {
   rows.forEach(r => { r.row.querySelector('[data-sum]').textContent = money(r.sum); });
   const total = rows.reduce((sum, r) => sum + r.sum, 0);
   const { amount } = itemsForm.purchase;
+  const onDebt = !!debtOf(itemsForm.purchase);
   const diff = total - amount;
-  const balance = itemsForm.balance - diff;
+  // У закупки в долг разница ложится на долг, а не на аванс.
+  const balance = onDebt ? itemsForm.balance : itemsForm.balance - diff;
   const notes = [];
   if (total && diff) {
-    notes.push(`<div class="note warn"><span>Сумма закупки <b class="num">${money(amount)} сом</b>, по позициям <b class="num">${money(total)} сом</b>. Разница <b class="num">${diff > 0 ? '+' : ''}${money(diff)} сом</b>.</span></div>`);
+    notes.push(`<div class="note warn"><span>Сумма закупки <b class="num">${money(amount)} сом</b>, по позициям <b class="num">${money(total)} сом</b>. Разница <b class="num">${diff > 0 ? '+' : ''}${money(diff)} сом</b>${onDebt ? ', на столько изменится долг поставщику' : ''}.</span></div>`);
     if (balance < 0 && diff > 0) notes.push(`<div class="note bad"><span>Перерасход составит <b class="num">${money(-balance)} сом</b>.</span></div>`);
   }
   $('i-total').textContent = `${money(total)} сом`;
@@ -1323,6 +1505,11 @@ async function submitItems() {
   if (rows.some(r => !r.item)) { toast('Заполните наименование, количество и цену в каждой позиции.'); return; }
   const items = rows.map(r => r.item);
   const total = items.reduce((sum, i) => sum + i.sum, 0);
+  const { purchase } = itemsForm;
+  if (items.length && debtOf(purchase) && total - purchase.paidNow < Math.max(itemsForm.repaid, 1)) {
+    toast(`По позициям выходит ${money(total)} сом, а поставщику уже отдано ${money(purchase.paidNow + itemsForm.repaid)} сом. Проверьте позиции или удалите лишние погашения.`, 7000);
+    return;
+  }
   if (items.length && total !== itemsForm.purchase.amount) {
     if (!itemsForm.armedAt) {
       itemsForm.armedAt = Date.now();
@@ -1408,12 +1595,276 @@ async function openSearch(fresh = false) {
 
 $('b-search').onclick = () => openSearch(true);
 $('q-input').addEventListener('input', renderSearch);
-$('q-list').addEventListener('click', e => {
-  const b = e.target.closest('[data-card]');
-  if (!b) return;
-  cardBack = 'search';
-  openCard(Number(b.dataset.card));
-});
+
+/* Списки за цифрами: нажатие на сумму показывает, из чего она сложилась */
+
+// build() каждый раз читает базу заново: после правки в карточке «Назад» покажет свежий список.
+async function openList(build) {
+  const { title, body, bind } = await build();
+  $('ls-title').textContent = title;
+  $('ls-body').innerHTML = body;
+  if (bind) bind();
+  show('list', () => openList(build));
+}
+
+const countLabel = (n, one, few, many) => `${n} ${plural(n, one, few, many)}`;
+
+function listBody({ sub, total, lines = [], ops, empty, after = '' }) {
+  const line = ([label, value, cls = '']) => `<div class="${cls}"><span>${label}</span><span class="v">${value}</span></div>`;
+  const totalRow = total === undefined ? [] : [['Итого', `${money(total)} сом`, 'total']];
+  return (sub ? `<p class="muted hint">${sub}</p>` : '') +
+    (lines.length || totalRow.length ? `<div class="sum">${[...lines, ...totalRow].map(line).join('')}</div>` : '') +
+    after +
+    `<div class="list">${ops.length ? ops.map(renderOperation).join('') : `<div class="empty">${empty}</div>`}</div>`;
+}
+
+const periodLabel = period => (period ? `Период ${esc(period.number)}` : 'Период не открыт');
+
+async function periodData(periodId) {
+  const period = periodId ? await db.periods.get(periodId) : null;
+  return { period, sum: await periodSummary(period) };
+}
+
+// Закупки периода по условию: строки «в т.ч.» расчёта и плашки.
+const periodPurchases = (title, filter, empty, withStorno = false) => periodId => async () => {
+  const { period, sum } = await periodData(periodId);
+  const list = sum.purchases.filter(p => (withStorno || p.status === 'active') && filter(p));
+  return {
+    title,
+    body: listBody({
+      sub: `${periodLabel(period)} · ${countLabel(list.length, 'закупка', 'закупки', 'закупок')}`,
+      total: sumAmounts(list),
+      ops: sortOps(await purchaseOps(list)),
+      empty,
+    }),
+  };
+};
+
+const advancesList = periodId => async () => {
+  const { period, sum } = await periodData(periodId);
+  const open = period && period.status === 'open';
+  return {
+    title: 'Выдано авансом',
+    body: listBody({
+      sub: `${periodLabel(period)} · ${countLabel(sum.advances.length, 'выдача', 'выдачи', 'выдач')}`,
+      total: sum.issued,
+      ops: sortOps(advanceOps(sum.advances)),
+      empty: 'Выдач в этом периоде нет.',
+      after: open || !period ? '<button class="btn full" type="button" id="ls-act">+ Выдача аванса</button>' : '',
+    }),
+    bind: () => { if ($('ls-act')) $('ls-act').onclick = () => drill(() => openAdvance('advance')); },
+  };
+};
+
+const returnsList = periodId => async () => {
+  const { period, sum } = await periodData(periodId);
+  const open = period && period.status === 'open';
+  return {
+    title: 'Возвращено в кассу',
+    body: listBody({
+      sub: `${periodLabel(period)} · ${countLabel(sum.returns.length, 'возврат', 'возврата', 'возвратов')}`,
+      total: sum.returned,
+      ops: sortOps(returnOps(sum.returns)),
+      empty: 'Возвратов в этом периоде нет.',
+      after: open ? '<button class="btn full" type="button" id="ls-act">Возврат денег</button>' : '',
+    }),
+    bind: () => { if ($('ls-act')) $('ls-act').onclick = () => drill(() => openAdvance('return')); },
+  };
+};
+
+const repaymentsList = periodId => async () => {
+  const { period, sum } = await periodData(periodId);
+  return {
+    title: 'Погашение долгов',
+    body: listBody({
+      sub: `${periodLabel(period)} · из аванса этого периода`,
+      total: sum.repaid,
+      ops: sortOps(await repaymentOps(sum.repayments)),
+      empty: 'Погашений в этом периоде нет.',
+    }),
+  };
+};
+
+// Израсходовано из аванса: закупки без их части в долг и погашения долгов.
+const spentList = periodId => async () => {
+  const { period, sum } = await periodData(periodId);
+  const active = sum.purchases.filter(p => p.status === 'active');
+  const lines = sum.onDebt || sum.repaid
+    ? [
+      [`Закупки (${active.length})`, money(sum.bought)],
+      ...(sum.onDebt ? [['<span class="muted">минус взятое в долг</span>', `−${money(sum.onDebt)}`]] : []),
+      ...(sum.repaid ? [[`Погашение долгов (${sum.repayments.length})`, `+${money(sum.repaid)}`]] : []),
+    ]
+    : [];
+  return {
+    title: 'Израсходовано',
+    body: listBody({
+      sub: periodLabel(period),
+      lines,
+      total: sum.spent,
+      ops: sortOps([...await purchaseOps(active), ...await repaymentOps(sum.repayments)]),
+      empty: 'Расходов в этом периоде нет.',
+    }),
+  };
+};
+
+// Кому и сколько должен, по всем периодам. Дальше — поставщик и его закупки в долг.
+const debtsList = () => async () => {
+  const [debts, names] = await Promise.all([getDebts(), supplierNames()]);
+  const bySupplier = new Map();
+  debts.forEach(d => {
+    const row = bySupplier.get(d.supplierId) || { id: d.supplierId, name: names.get(d.supplierId), left: 0, count: 0 };
+    row.left += d.left;
+    row.count += 1;
+    bySupplier.set(d.supplierId, row);
+  });
+  const rows = [...bySupplier.values()].sort((a, b) => b.left - a.left);
+  const total = sumLeft(debts);
+  return {
+    title: 'Кому должен',
+    body: '<p class="muted hint">Товар взят в долг. Долг не входит в остаток аванса: из аванса уходят только погашения.</p>' +
+      (rows.length ? `<div class="sum"><div class="total"><span>Всего долг</span><span class="v">${money(total)} сом</span></div></div>` : '') +
+      `<div class="list">${rows.length
+        ? rows.map(r => `<button class="item plain" type="button" data-open="supplier:${r.id}"><span class="body"><span class="t">${esc(r.name)}</span><span class="s">${countLabel(r.count, 'закупка', 'закупки', 'закупок')} в долг</span></span><span class="a">${money(r.left)}<span class="chev">›</span></span></button>`).join('')
+        : '<div class="empty">Долгов нет.</div>'}</div>`,
+  };
+};
+
+// Цифры плашки и строки расчёта в Отчёте ведут сюда.
+const SUM_LISTS = {
+  issued: advancesList,
+  spent: spentList,
+  bought: periodPurchases('Закупки', () => true, 'Закупок в этом периоде нет.'),
+  services: periodPurchases('Услуги', p => p.type === 'service', 'Услуг в этом периоде нет.'),
+  noDoc: periodPurchases('Без документов', p => p.docType === 'none', 'Все закупки с документами.'),
+  onDebt: periodPurchases('Взято в долг', p => debtOf(p) > 0, 'В долг в этом периоде не брали.'),
+  storno: periodPurchases('Сторно', p => p.status === 'storno', 'Сторно в этом периоде нет.', true),
+  repaid: repaymentsList,
+  returned: returnsList,
+  debts: debtsList,
+};
+
+/* Поставщик: контакты, долг, все закупки и снимки */
+
+function renderDebtRow(d) {
+  const repaid = d.repaid ? `, погашено ${money(d.repaid)}` : '';
+  return `<button class="item" type="button" data-open="card:${d.id}"><span class="no">№${pad3(d.no)}<br>${dShort(d.dt)}</span><span class="body"><span class="t">${esc(purchaseTitle(d))}</span><span class="s">в долг ${money(debtOf(d))}${repaid}</span></span><span class="a">${money(d.left)}</span></button>`;
+}
+
+async function openSupplier(id) {
+  const [supplier, purchases, debts, shots] = await Promise.all([
+    db.suppliers.get(id),
+    db.purchases.where('supplierId').equals(id).toArray(),
+    getDebts(),
+    getSupplierPhotos(id),
+  ]);
+  const own = debts.filter(d => d.supplierId === id);
+  const left = sumLeft(own);
+  const active = purchases.filter(p => p.status === 'active');
+  const row = (dt, dd) => `<div><dt>${dt}</dt><dd>${dd}</dd></div>`;
+  releaseViewPhotos();
+  $('sp-title').textContent = supplier.name;
+  $('sp-body').innerHTML =
+    '<dl class="kv">' +
+    (supplier.phone ? row('Телефон', telLink(supplier.phone)) : '') +
+    (supplier.place ? row('Базар', esc(supplier.place)) : '') +
+    row('Закупки', `${active.length} на ${money(sumAmounts(active))} сом`) +
+    (supplier.comment ? row('Комментарий', esc(supplier.comment)) : '') +
+    (supplier.archived ? row('В архиве', 'да') : '') +
+    '</dl>' +
+    (left
+      ? `<div class="section-h"><h3>Должен</h3><span class="num">${money(left)} сом</span></div>` +
+        `<div class="list">${own.map(renderDebtRow).join('')}</div>` +
+        '<button class="btn primary full" type="button" id="sp-repay">Погасить долг</button>'
+      : '') +
+    `<div class="section-h"><h3>Все закупки</h3><span class="muted tnum">${purchases.length}</span></div>` +
+    `<div class="list">${purchases.length ? sortOps(await purchaseOps(purchases)).map(renderOperation).join('') : '<div class="empty">Закупок пока нет.</div>'}</div>` +
+    (shots.length
+      ? '<div class="section-h"><h3>Фото поставщика</h3></div>' + shots.map(({ blob, purchase }) =>
+        `<img class="photo-full" src="${viewPhotoUrl(blob)}" alt="Фото поставщика, закупка №${pad3(purchase.no)}"><p class="muted hint">Закупка №${pad3(purchase.no)}, ${dFull(purchase.dt)}</p>`).join('')
+      : '') +
+    '<button class="btn full" type="button" id="sp-edit">Изменить данные поставщика</button>';
+  if (left) $('sp-repay').onclick = () => drill(() => openRepay(own.map(d => d.id)));
+  $('sp-edit').onclick = () => drill(() => openDict('supplier', id));
+  show('supplier', () => openSupplier(id));
+}
+
+/* Погашение долга: из карточки закупки или со страницы поставщика сразу за несколько */
+
+const repay = { ids: [], left: 0, balance: 0, range: null, saving: false };
+
+async function openRepay(purchaseIds) {
+  const debts = (await getDebts()).filter(d => purchaseIds.includes(d.id));
+  if (!debts.length) {
+    toast('Этот долг уже погашен.');
+    return;
+  }
+  const [open, names] = await Promise.all([getOpenPeriod(), supplierNames()]);
+  const { balance } = await periodSummary(open);
+  const today = todayIso();
+  // Погашение не раньше открытия текущего периода и не раньше самой закупки. Нового периода ещё нет — только сегодня.
+  const latest = debts.reduce((max, d) => (d.dt.slice(0, 10) > max ? d.dt.slice(0, 10) : max), '');
+  const from = open ? (open.opened > latest ? open.opened : latest) : today;
+  repay.ids = debts.map(d => d.id);
+  repay.left = sumLeft(debts);
+  repay.balance = balance;
+  repay.range = [from < today ? from : today, today];
+  const suppliers = [...new Set(debts.map(d => names.get(d.supplierId)))];
+  $('p-sum').innerHTML =
+    `<div><span>${suppliers.length > 1 ? 'Поставщики' : 'Поставщик'}</span><span>${esc(suppliers.join(', '))}</span></div>` +
+    `<div><span>${debts.length > 1 ? `Закупки (${debts.length})` : 'Закупка'}</span><span class="num">${debts.map(d => '№' + pad3(d.no)).join(', ')}</span></div>` +
+    `<div class="total"><span>Осталось отдать</span><span class="v">${money(repay.left)} сом</span></div>`;
+  $('p-amount').value = money(repay.left);
+  $('p-comment').value = '';
+  [$('p-date').min, $('p-date').max] = repay.range;
+  $('p-date').value = today;
+  chips($('p-method'), 'pmethod', Object.entries(MONEY_METHOD), 'cash');
+  $('p-hint').textContent = (debts.length > 1 ? 'Сумма закроет долги по очереди, начиная со старого. ' : '') +
+    `Деньги уйдут из аванса ${open ? `периода ${open.number}` : 'нового периода'}, даже если долг взят раньше.`;
+  updateRepayNote();
+  show('repay', () => openRepay(purchaseIds));
+}
+
+function updateRepayNote() {
+  const amount = parseMoney($('p-amount').value) || 0;
+  $('p-over').innerHTML = amount > repay.left
+    ? `<div class="note bad"><span>Это больше долга. Отдать осталось <b class="num">${money(repay.left)} сом</b>.</span></div>`
+    : amount > repay.balance
+      ? `<div class="note bad"><span>Сумма больше остатка аванса. Перерасход составит <b class="num">${money(amount - Math.max(repay.balance, 0))} сом</b>, сохранить можно.</span></div>`
+      : '';
+}
+
+$('p-amount').addEventListener('input', updateRepayNote);
+
+$('p-save').onclick = async () => {
+  if (repay.saving) return;
+  const amount = parseMoney($('p-amount').value);
+  const date = $('p-date').value;
+  if (!amount) { toast('Введите сумму погашения.'); $('p-amount').focus(); return; }
+  if (amount > repay.left) { toast(`Отдать осталось ${money(repay.left)} сом.`); $('p-amount').focus(); return; }
+  if (!date || date < repay.range[0] || date > repay.range[1]) {
+    toast(`Дата должна быть от ${dFull(repay.range[0])} до ${dFull(repay.range[1])}.`);
+    $('p-date').focus();
+    return;
+  }
+  repay.saving = true;
+  $('p-save').disabled = true;
+  try {
+    await repayDebts(repay.ids, { amount, method: radioVal('pmethod'), dt: date + nowLocal().slice(10), comment: $('p-comment').value.trim() });
+  } catch (err) {
+    if (err instanceof LimitError) toast(`Отдать осталось ${money(err.limit)} сом.`);
+    else {
+      console.error(err);
+      toast('Погашение не сохранилось. Попробуйте ещё раз.');
+    }
+    return;
+  } finally {
+    repay.saving = false;
+    $('p-save').disabled = false;
+  }
+  await goBack();
+  toast(amount === repay.left ? 'Долг погашен' : `Погашено ${money(amount)} сом, осталось ${money(repay.left - amount)} сом`);
+};
 
 /* Отдача файлов */
 
@@ -1523,13 +1974,13 @@ function renderMeter(r) {
   const note = pct > 100
     ? `Перерасход ${money(r.spent - r.issued)} сом`
     : `Потрачено ${money(r.spent)} из ${money(r.issued)} сом`;
-  return `<div class="stat"><div class="stat-head"><h3>Использование аванса</h3><span class="stat-big">${pct}%</span></div>` +
+  return `<div class="stat"><button class="stat-head" type="button" id="st-meter"><h3>Использование аванса<span class="chev">›</span></h3><span class="stat-big">${pct}%</span></button>` +
     `<div class="meter" role="img" aria-label="Использовано ${pct}% аванса"><i class="${level}" style="width:${Math.min(pct, 100)}%"></i></div>` +
     `<div class="stat-note">${note}</div></div>`;
 }
 
 function renderRangeTotal(stats) {
-  return `<div class="stat"><div class="stat-head"><h3>Потрачено</h3><span class="stat-big">${money(stats.spent)} сом</span></div>` +
+  return `<div class="stat"><button class="stat-head" type="button" id="st-total"><h3>Закуплено<span class="chev">›</span></h3><span class="stat-big">${money(stats.spent)} сом</span></button>` +
     `<div class="stat-note">${stats.count} ${plural(stats.count, 'закупка', 'закупки', 'закупок')}</div></div>`;
 }
 
@@ -1544,20 +1995,27 @@ function renderDays(stats) {
   ).join('');
   const label = buckets.map(b => `${b.label}: ${money(b.sum)} сом`).join(', ');
   return `<div class="stat"><h3>Расходы по ${unit}</h3>` +
-    `<div class="stat-note" id="st-day">Больше всего: ${buckets[peak].label} — ${money(max)} сом</div>` +
+    `<button class="linkbtn" type="button" id="st-day">Больше всего: ${buckets[peak].label} — ${money(max)} сом ›</button>` +
     `<div class="plot" id="st-plot" role="img" aria-label="${esc(label)}">${columns}</div>` +
     `<div class="axis"><span>${buckets[0].label}</span><span>${buckets[buckets.length - 1].label}</span></div></div>`;
 }
 
 // Касание и ведение пальцем по графику: столбцы слишком узкие, чтобы попадать в каждый.
+// Под графиком — выбранный столбец. Нажатие на подпись открывает его закупки.
 function bindDays(stats) {
   const plot = $('st-plot');
   if (!plot) return;
+  let picked = stats.buckets.findIndex(b => b.sum === Math.max(...stats.buckets.map(x => x.sum)));
   const select = e => {
     const box = plot.getBoundingClientRect();
     const i = Math.min(Math.max(Math.floor((e.clientX - box.left) / box.width * stats.buckets.length), 0), stats.buckets.length - 1);
+    picked = i;
     [...plot.children].forEach((c, k) => c.classList.toggle('on', k === i));
-    $('st-day').textContent = `${stats.buckets[i].label} — ${money(stats.buckets[i].sum)} сом`;
+    $('st-day').textContent = `${stats.buckets[i].label} — ${money(stats.buckets[i].sum)} сом ›`;
+  };
+  $('st-day').onclick = () => {
+    const { from, to, label } = stats.buckets[picked];
+    openStatsList(`Закупки ${label}`, p => p.dt.slice(0, 10) >= from && p.dt.slice(0, 10) <= to);
   };
   plot.addEventListener('click', select);
   plot.addEventListener('pointerdown', select);
@@ -1570,18 +2028,19 @@ function renderSplit(stats) {
   const share = v => Math.max(Math.round(v * 100 / stats.spent), 1);
   return '<div class="stat"><h3>Товары и услуги</h3>' +
     `<div class="split" role="img" aria-label="Товары ${share(stats.goodsSum)}%, услуги ${share(stats.services)}%"><i class="a" style="flex:${stats.goodsSum}"></i><i class="b" style="flex:${stats.services}"></i></div>` +
-    `<div class="legend"><div><i class="a"></i><span>Товары</span><span class="v">${money(stats.goodsSum)} · ${share(stats.goodsSum)}%</span></div>` +
-    `<div><i class="b"></i><span>Услуги</span><span class="v">${money(stats.services)} · ${share(stats.services)}%</span></div></div></div>`;
+    `<div class="legend"><button type="button" data-type="goods"><i class="a"></i><span>Товары<span class="chev">›</span></span><span class="v">${money(stats.goodsSum)} · ${share(stats.goodsSum)}%</span></button>` +
+    `<button type="button" data-type="service"><i class="b"></i><span>Услуги<span class="chev">›</span></span><span class="v">${money(stats.services)} · ${share(stats.services)}%</span></button></div></div>`;
 }
 
 function renderTopRows(rows) {
   if (!rows.length) return '<div class="stat-note">Пока нет данных.</div>';
   const max = rows.reduce((m, x) => Math.max(m, x.amount), 0);
-  return rows.map(x =>
-    `<div><div class="rank-h"><span>${esc(x.name)}</span><span class="v">${money(x.amount)}</span></div>` +
-    (rows.length > 1 ? `<div class="rank-bar"><i class="${x.other ? 'other' : ''}" style="width:${x.amount / max * 100}%"></i></div>` : '') +
-    '</div>'
-  ).join('');
+  // «Прочие» не раскрываются: это сумма многих мелких строк.
+  return rows.map((x, i) => {
+    const inner = `<div class="rank-h"><span>${esc(x.name)}${x.other ? '' : '<span class="chev">›</span>'}</span><span class="v">${money(x.amount)}</span></div>` +
+      (rows.length > 1 ? `<div class="rank-bar"><i class="${x.other ? 'other' : ''}" style="width:${x.amount / max * 100}%"></i></div>` : '');
+    return x.other ? `<div>${inner}</div>` : `<button type="button" data-top="${i}">${inner}</button>`;
+  }).join('');
 }
 
 function renderStats(head, stats, emptyNote) {
@@ -1596,6 +2055,57 @@ function renderStats(head, stats, emptyNote) {
   chips($('st-top'), 'top', Object.entries(TOP_VIEWS), topView);
   $('st-top').onchange = e => { topView = e.target.value; drawTop(); };
   drawTop();
+  $('st-rank').onclick = e => {
+    const b = e.target.closest('[data-top]');
+    if (b) openTop(stats.top[topView][Number(b.dataset.top)].name);
+  };
+  if ($('st-total')) $('st-total').onclick = () => openStatsList('Закупки', () => true);
+  $('r-stats').querySelectorAll('[data-type]').forEach(b => {
+    b.onclick = () => openStatsList(b.dataset.type === 'goods' ? 'Товары' : 'Услуги', p => (p.type || 'goods') === b.dataset.type);
+  });
+}
+
+// Что сейчас выбрано в статистике: период или даты. Список за ними читает базу заново при возврате.
+function statsScope() {
+  if (statsRange.mode === 'period') {
+    const { period } = report;
+    return {
+      label: `Период ${period.number}`,
+      load: async () => (await withSuppliers((await periodSummary(period)).purchases)).filter(p => p.status === 'active'),
+    };
+  }
+  const [from, to] = rangeDates();
+  return { label: from === to ? dFull(from) : `${dFull(from)} — ${dFull(to)}`, load: () => purchasesBetween(from, to) };
+}
+
+function openStatsList(title, filter) {
+  const { label, load } = statsScope();
+  drill(() => openList(async () => {
+    const list = (await load()).filter(filter);
+    return {
+      title,
+      body: listBody({
+        sub: `${label} · ${countLabel(list.length, 'закупка', 'закупки', 'закупок')}`,
+        total: sumAmounts(list),
+        ops: sortOps(await purchaseOps(list)),
+        empty: 'Закупок нет.',
+      }),
+    };
+  }));
+}
+
+// Поставщик открывает свою страницу, базар и товар — закупки за выбранное время.
+async function openTop(name) {
+  if (topView === 'suppliers') {
+    const supplier = await db.suppliers.where('name').equals(name).first();
+    if (supplier) drill(() => openSupplier(supplier.id));
+    return;
+  }
+  if (topView === 'bazaars') {
+    openStatsList(name, p => p.type !== 'service' && (p.place || 'Не указан') === name);
+    return;
+  }
+  openStatsList(name, p => (p.items.length ? p.items.some(i => i.name === name) : (p.title || 'Без названия') === name));
 }
 
 /* Диапазон статистики: отчётный период или любые даты, в том числе через несколько периодов */
@@ -1646,6 +2156,7 @@ async function drawStats() {
   if (mode === 'period') {
     const r = report;
     renderStats(renderMeter(r), reportStats(r.active, r.period.opened, r.end), 'Закупок пока нет. Графики появятся после первой закупки.');
+    if ($('st-meter')) $('st-meter').onclick = () => drill(() => openList(spentList(r.period.id)));
     return;
   }
   const [from, to] = rangeDates();
@@ -1690,16 +2201,19 @@ $('r-view').addEventListener('change', e => {
   applyReportView();
 });
 
+// Каждая строка расчёта раскрывается списком записей, из которых она сложилась.
 function renderReportSum(r) {
-  const row = (label, value, cls = '') => `<div><span>${label}</span><span class="v ${cls}">${value}</span></div>`;
-  return row('Выдано авансом', money(r.issued)) +
-    row(`Израсходовано (${r.count} ${plural(r.count, 'закупка', 'закупки', 'закупок')})`, money(r.spent)) +
-    row('<span class="muted">в т.ч. услуги</span>', money(r.services)) +
-    row('<span class="muted">в т.ч. без документов</span>', money(r.noDoc), 'warn') +
-    row('<span class="muted">Сторно, не учитывается</span>', money(r.stornoSum), 'muted') +
-    row('Возвращено в кассу', money(r.ret)) +
-    `<div class="total"><span>${balanceLabel(r)}</span><span class="v ${r.balance < 0 ? 'bad' : ''}">${money(Math.abs(r.balance))} сом</span></div>`;
+  const row = ({ key, label, value, sub, cls = '' }) =>
+    `<button type="button" data-sum="${key}"><span>${sub ? `<span class="muted">${label}</span>` : label}</span><span class="v ${cls}">${money(value)}<span class="chev">›</span></span></button>`;
+  return settlementRows(r).map(row).join('') +
+    `<div class="total"><span>${balanceLabel(r)}</span><span class="v ${r.balance < 0 ? 'bad' : ''}">${money(Math.abs(r.balance))} сом</span></div>` +
+    (r.debtEnd ? row({ key: 'debts', label: debtEndLabel(r), value: r.debtEnd, cls: 'warn' }) : '');
 }
+
+$('r-sum').addEventListener('click', e => {
+  const b = e.target.closest('[data-sum]');
+  if (b) drill(() => openList(SUM_LISTS[b.dataset.sum](report.period.id)));
+});
 
 async function showReport(periodId) {
   const [periods, current] = await Promise.all([db.periods.toArray(), getCurrentPeriod()]);
@@ -1741,13 +2255,13 @@ async function showReport(periodId) {
   $('r-sum').innerHTML = renderReportSum(r);
   $('r-table').innerHTML =
     '<thead><tr><th>№</th><th>Дата</th><th>Товар / услуга</th><th>Поставщик</th><th>Документ</th><th>Оплата</th><th class="r">Сумма</th></tr></thead><tbody>' +
-    r.purchases.map(p => `<tr${p.status === 'storno' ? ' class="struck"' : ''}><td class="num">${pad3(p.no)}</td><td class="tnum">${dShort(p.dt)}</td><td>${esc(reportTitle(p))}</td><td>${esc(p.supplier)}</td><td>${DOC[p.docType]}</td><td>${PAY[p.payment]}</td><td class="r">${money(p.amount)}</td></tr>`).join('') +
-    `</tbody><tfoot><tr><td colspan="6">Итого без сторно</td><td class="r">${money(r.spent)}</td></tr></tfoot>`;
+    r.purchases.map(p => `<tr data-open="card:${p.id}"${p.status === 'storno' ? ' class="struck"' : ''}><td class="num">${pad3(p.no)}</td><td class="tnum">${dShort(p.dt)}</td><td>${esc(reportTitle(p))}</td><td>${esc(p.supplier)}</td><td>${DOC[p.docType]}</td><td>${PAY[p.payment]}</td><td class="r">${money(p.amount)}</td></tr>`).join('') +
+    `</tbody><tfoot><tr><td colspan="6">Итого без сторно</td><td class="r">${money(r.bought)}</td></tr></tfoot>`;
 
   $('r-close').hidden = closed;
   if (closed) $('r-reopen').innerHTML = '<button class="btn danger full" type="button" id="r-reopen-open">Переоткрыть период</button>';
   if (closed) $('r-reopen-open').onclick = openReopen;
-  show('report');
+  show('report', () => showReport(period.id));
 }
 
 $('r-period').onchange = e => showReport(Number(e.target.value));
@@ -1794,23 +2308,26 @@ function updateCloseButton() {
 
 // В новый период остаток не переходит, поэтому неполный возврат нельзя оставить незамеченным.
 function updateReturnNote() {
-  const left = report.issued - report.spent - (parseMoney($('cl-ret').value) || 0);
+  const left = report.balance - (parseMoney($('cl-ret').value) || 0);
   $('cl-left').innerHTML = left > 0
     ? `<div class="note warn"><span>На руках останется <b class="num">${money(left)} сом</b>. В новый период этот остаток не перейдёт, он будет только в отчёте этого периода.</span></div>`
     : '';
 }
 
-function openClose() {
+async function openClose() {
   const r = report;
-  const available = r.issued - r.spent;
+  const available = r.balance;
+  const debt = sumLeft(await getDebts());
   closing.backedUp = false;
   $('cl-sum').innerHTML =
     `<div><span>Выдано</span><span class="v">${money(r.issued)}</span></div>` +
     `<div><span>Израсходовано</span><span class="v">${money(r.spent)}</span></div>` +
+    (r.returned ? `<div><span>Уже возвращено</span><span class="v">${money(r.returned)}</span></div>` : '') +
     `<div class="total"><span>${available < 0 ? 'Перерасход' : 'Остаток на руках'}</span><span class="v ${available < 0 ? 'bad' : ''}">${money(Math.abs(available))} сом</span></div>`;
   const notes = [];
   if (r.withoutItems.length) notes.push(`<div class="note warn"><span>Без позиций: ${withoutItemsLabel(r.withoutItems)}. После закрытия внести их можно только через переоткрытие.</span></div>`);
   if (available < 0) notes.push(`<div class="note bad"><span>Перерасход <b class="num">${money(-available)} сом</b> будет зафиксирован в отчёте.</span></div>`);
+  if (debt) notes.push(`<div class="note info"><span>Долг поставщикам <b class="num">${money(debt)} сом</b> не входит в остаток и после закрытия останется: погасить его можно из следующего аванса.</span></div>`);
   $('cl-notes').innerHTML = notes.join('');
   $('cl-ret').value = money(Math.max(available, 0));
   updateReturnNote();
@@ -1845,7 +2362,7 @@ $('cl-do').onclick = async () => {
   const r = report;
   const ret = parseMoney($('cl-ret').value);
   if (ret === null) { toast('Введите сумму возврата.'); $('cl-ret').focus(); return; }
-  if (ret > Math.max(r.issued - r.spent, 0)) { toast('Возврат не может превышать остаток.'); $('cl-ret').focus(); return; }
+  if (ret > Math.max(r.balance, 0)) { toast('Возврат не может превышать остаток.'); $('cl-ret').focus(); return; }
   closing.saving = true;
   try {
     await closePeriod(r.period.id, ret);
@@ -1865,13 +2382,14 @@ $('cl-do').onclick = async () => {
 const dict = { kind: null, record: null, saving: false };
 
 async function showMore() {
-  const [userName, org, lastBackupAt, suppliers, bazaars, purchases] = await Promise.all([
+  const [userName, org, lastBackupAt, suppliers, bazaars, purchases, debts] = await Promise.all([
     getSetting('userName'),
     getSetting('org'),
     getSetting('lastBackupAt'),
     db.suppliers.toArray(),
     db.bazaars.toArray(),
     db.purchases.where('status').equals('active').toArray(),
+    getDebts(),
   ]);
   const byName = (a, b) => a.name.localeCompare(b.name, 'ru');
   $('s-name').value = userName || '';
@@ -1887,7 +2405,8 @@ async function showMore() {
   $('s-sup').innerHTML = suppliers.length
     ? suppliers.sort(byName).map(s => {
       const own = purchases.filter(p => p.supplierId === s.id);
-      return `<button class="item plain" type="button" data-dict="supplier" data-id="${s.id}"><span class="t">${esc(s.name)}${s.archived ? '<span class="tag warn">архив</span>' : ''}</span><span class="s tnum">${own.length} закуп. · ${money(sumAmounts(own))}</span></button>`;
+      const debt = sumLeft(debts.filter(d => d.supplierId === s.id));
+      return `<button class="item plain" type="button" data-open="supplier:${s.id}"><span class="t">${esc(s.name)}${s.archived ? '<span class="tag warn">архив</span>' : ''}${debt ? `<span class="tag warn">долг ${money(debt)}</span>` : ''}</span><span class="s tnum">${own.length} закуп. · ${money(sumAmounts(own))}</span></button>`;
     }).join('')
     : '<div class="empty">Появятся после первой закупки.</div>';
   show('more');
@@ -1967,11 +2486,14 @@ const formatSize = bytes => (bytes < 1048576 ? `${Math.max(Math.round(bytes / 10
 const archive = { built: null, unpack: null };
 
 async function openArchive() {
-  const { periods, purchases, photos, size } = await closedPeriodsData();
+  const { periods, kept, purchases, photos, size } = await closedPeriodsData();
   const row = (label, value) => `<div><span>${label}</span><span class="v">${value}</span></div>`;
   archive.built = null;
   $('ar-sum').innerHTML = row('Закрытые периоды', periods.length) + row('Закупки', purchases.length) + row('Фото', `${photos.length}, ${formatSize(size)}`);
-  $('ar-note').innerHTML = periods.length ? '' : '<div class="note warn"><span>Закрытых периодов пока нет. Архивируются только закрытые.</span></div>';
+  const notes = [];
+  if (!periods.length && !kept.length) notes.push('<div class="note warn"><span>Закрытых периодов пока нет. Архивируются только закрытые.</span></div>');
+  if (kept.length) notes.push(`<div class="note warn"><span>Остаются в приложении: ${esc(kept.map(p => p.number).join(', '))}. В них есть непогашенный долг или погашение, связанное с открытым периодом.</span></div>`);
+  $('ar-note').innerHTML = notes.join('');
   $('ar-make').hidden = !periods.length;
   $('ar-make').disabled = false;
   $('ar-make').textContent = 'Создать архив';
@@ -2135,20 +2657,13 @@ async function openDict(kind, id) {
   $('d-phone').value = record.phone || '';
   $('d-comment').value = record.comment || '';
   $('d-hide').checked = supplier ? record.archived : !record.active;
-  const shots = supplier ? await getSupplierPhotos(id) : [];
-  releaseViewPhotos();
-  $('d-photos').hidden = !shots.length;
-  $('d-photos').innerHTML = shots.length
-    ? '<div class="section-h"><h3>Фото поставщика</h3></div>' + shots.map(({ blob, purchase }) =>
-      `<img class="photo-full" src="${viewPhotoUrl(blob)}" alt="Фото поставщика, закупка №${pad3(purchase.no)}"><p class="muted hint">Закупка №${pad3(purchase.no)}, ${dFull(purchase.dt)}</p>`).join('')
-    : '';
-  show('dict');
+  show('dict', () => openDict(kind, id));
 }
 
-['s-baz', 's-sup'].forEach(id => $(id).addEventListener('click', e => {
+$('s-baz').addEventListener('click', e => {
   const b = e.target.closest('[data-dict]');
-  if (b) openDict(b.dataset.dict, Number(b.dataset.id));
-}));
+  if (b) drill(() => openDict(b.dataset.dict, Number(b.dataset.id)));
+});
 
 async function submitDict() {
   if (dict.saving) return;
@@ -2174,49 +2689,76 @@ async function submitDict() {
   } finally {
     dict.saving = false;
   }
-  await showMore();
+  await goBack();
   toast('Сохранено');
 }
 
 $('d-save').onclick = submitDict;
 
-/* Выдача аванса */
+/* Выдача аванса и возврат денег: одна форма, деньги идут в разные стороны */
 
-let advanceSaving = false;
+const advForm = { mode: 'advance', balance: 0, range: null, saving: false };
 
-function openAdvance() {
+async function openAdvance(mode) {
+  const ret = mode === 'return';
+  const today = todayIso();
+  advForm.mode = mode;
+  if (ret) {
+    const period = await getOpenPeriod();
+    advForm.balance = (await periodSummary(period)).balance;
+    if (!period || advForm.balance <= 0) {
+      toast(advForm.balance < 0 ? 'Сейчас перерасход: возвращать нечего.' : 'На руках ничего не осталось: возвращать нечего.');
+      return;
+    }
+    advForm.range = [period.opened < today ? period.opened : today, today];
+  }
+  $('a-title').textContent = ret ? 'Возврат денег' : 'Выдача аванса';
+  $('a-by-label').textContent = ret ? 'Кому вернул' : 'Кто выдал';
+  $('a-comment-field').hidden = !ret;
+  $('a-save').textContent = ret ? 'Сохранить возврат' : 'Добавить выдачу';
+  $('a-note').innerHTML = ret ? `<div class="note info"><span>На руках <b class="num">${money(advForm.balance)} сом</b>. Вернуть можно не больше.</span></div>` : '';
   $('a-amount').value = '';
   $('a-by').value = 'Бухгалтерия';
-  $('a-date').value = nowLocal().slice(0, 10);
-  chips($('a-method'), 'method', Object.entries(ADV_METHOD), 'cash');
-  show('adv');
+  $('a-comment').value = '';
+  [$('a-date').min, $('a-date').max] = ret ? advForm.range : ['', ''];
+  $('a-date').value = today;
+  chips($('a-method'), 'method', Object.entries(ret ? MONEY_METHOD : ADV_METHOD), 'cash');
+  show('adv', () => openAdvance(mode));
 }
 
 async function submitAdvance() {
-  if (advanceSaving) return;
+  if (advForm.saving) return;
+  const ret = advForm.mode === 'return';
   const amount = parseMoney($('a-amount').value);
-  if (!amount) { toast('Введите сумму аванса.'); $('a-amount').focus(); return; }
+  const date = $('a-date').value || todayIso();
+  if (!amount) { toast(ret ? 'Введите сумму возврата.' : 'Введите сумму аванса.'); $('a-amount').focus(); return; }
+  if (ret && amount > advForm.balance) { toast(`Вернуть можно не больше ${money(advForm.balance)} сом.`); $('a-amount').focus(); return; }
+  if (ret && (date < advForm.range[0] || date > advForm.range[1])) {
+    toast(`Дата должна быть от ${dFull(advForm.range[0])} до ${dFull(advForm.range[1])}.`);
+    $('a-date').focus();
+    return;
+  }
 
-  advanceSaving = true;
+  advForm.saving = true;
   $('a-save').disabled = true;
   try {
-    await addAdvance({
-      amount,
-      method: radioVal('method'),
-      by: $('a-by').value.trim() || '—',
-      date: $('a-date').value || nowLocal().slice(0, 10),
-    });
+    const who = $('a-by').value.trim() || '—';
+    if (ret) await addReturn({ amount, method: radioVal('method'), to: who, dt: date + nowLocal().slice(10), comment: $('a-comment').value.trim() });
+    else await addAdvance({ amount, method: radioVal('method'), by: who, date });
   } catch (err) {
-    console.error(err);
-    toast('Выдача не сохранилась. Попробуйте ещё раз.');
+    if (err instanceof LimitError) toast(`Вернуть можно не больше ${money(err.limit)} сом.`);
+    else {
+      console.error(err);
+      toast(ret ? 'Возврат не сохранился. Попробуйте ещё раз.' : 'Выдача не сохранилась. Попробуйте ещё раз.');
+    }
     return;
   } finally {
-    advanceSaving = false;
+    advForm.saving = false;
     $('a-save').disabled = false;
   }
 
-  await showHome();
-  toast(`Выдача ${money(amount)} сом добавлена`);
+  await goBack();
+  toast(ret ? `Возврат ${money(amount)} сом сохранён` : `Выдача ${money(amount)} сом добавлена`);
 }
 
 $('a-save').onclick = submitAdvance;

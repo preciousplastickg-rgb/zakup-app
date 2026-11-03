@@ -36,6 +36,10 @@ async function buildReport(period) {
   const end = period.closed || nowLocal().slice(0, 10);
   return {
     ...summary,
+    repayments: await withPurchases(summary.repayments),
+    returns: summary.returns.slice().sort((a, b) => a.dt.localeCompare(b.dt)),
+    // Справочно: долг поставщикам по всем периодам на последний день отчёта. В остаток не входит.
+    debtEnd: sumLeft(await getDebts(end)),
     period,
     org: org || '',
     userName: userName || '',
@@ -47,7 +51,6 @@ async function buildReport(period) {
     services: sumAmounts(active.filter(p => p.type === 'service')),
     withoutItems: active.filter(p => !p.items.length),
     docsCount: active.filter(p => p.docType !== 'none').length,
-    ret: period.ret,
     end,
     fileBase: `${period.number}_${period.opened}_${end}`,
   };
@@ -87,7 +90,7 @@ function spendingBuckets(active, from, to) {
     const start = isoPlusDays(from, i * step);
     const end = isoPlusDays(start, step - 1);
     const label = step === 1 ? dShort(start) : step === 365 ? `${dFull(start)}–${dFull(end)}` : `${dShort(start)}–${dShort(end)}`;
-    return { label, sum: 0 };
+    return { label, from: start, to: end < to ? end : to, sum: 0 };
   });
   active.forEach(p => {
     const i = Math.floor(daysBetween(from, p.dt) / step);
@@ -132,6 +135,42 @@ async function withSuppliers(purchases) {
   });
 }
 
+// Погашения с закупкой, за которую отдан долг: она может быть из прошлого периода.
+async function withPurchases(repayments) {
+  const ids = [...new Set(repayments.map(r => r.purchaseId))];
+  const purchases = new Map((await withSuppliers((await db.purchases.bulkGet(ids)).filter(Boolean))).map(p => [p.id, p]));
+  const periods = new Map((await db.periods.toArray()).map(p => [p.id, p.number]));
+  return repayments.slice().sort((a, b) => a.dt.localeCompare(b.dt) || a.id - b.id).map(r => {
+    const purchase = purchases.get(r.purchaseId);
+    return { ...r, purchase, periodNumber: purchase ? periods.get(purchase.periodId) : '' };
+  });
+}
+
+// Как в файле назван долг, за который заплатили: номер закупки, её дата и период, если он другой.
+const repaymentSubject = (r, periodId) => (r.purchase
+  ? `№${pad3(r.purchase.no)} от ${dFull(r.purchase.dt)}${r.purchase.periodId !== periodId ? `, ${r.periodNumber}` : ''}: ${reportTitle(r.purchase)}`
+  : 'Закупка убрана в архив');
+
+// Строки расчёта одинаковы в приложении, Excel и PDF. key — что показать по нажатию в приложении.
+// Без долгов расчёт выглядит как раньше: закупки и есть израсходованное.
+function settlementRows(r) {
+  const n = `${r.count} ${plural(r.count, 'закупка', 'закупки', 'закупок')}`;
+  const withDebts = r.onDebt || r.repaid;
+  return [
+    { key: 'issued', label: 'Выдано авансом', value: r.issued },
+    { key: 'bought', label: withDebts ? `Закупки (${n})` : `Израсходовано (${n})`, value: r.bought },
+    { key: 'services', label: 'в т.ч. услуги', value: r.services, sub: true },
+    { key: 'noDoc', label: 'в т.ч. без документов', value: r.noDoc, sub: true, cls: 'warn' },
+    ...(r.onDebt ? [{ key: 'onDebt', label: 'в т.ч. взято в долг, не из аванса', value: r.onDebt, sub: true, cls: 'warn' }] : []),
+    ...(r.repaid ? [{ key: 'repaid', label: `Погашение долгов (${r.repayments.length})`, value: r.repaid }] : []),
+    ...(withDebts ? [{ key: 'spent', label: 'Израсходовано из аванса', value: r.spent }] : []),
+    { key: 'storno', label: 'Сторно, не учитывается', value: r.stornoSum, sub: true, cls: 'muted' },
+    { key: 'returned', label: 'Возвращено в кассу', value: r.returned },
+  ];
+}
+
+const debtEndLabel = r => `Долг поставщикам на ${dFull(r.end)}, вне аванса`;
+
 // Статистика за даты идёт через все отчётные периоды.
 async function purchasesBetween(from, to) {
   const list = await db.purchases.where('dt').between(from, `${to}T99`, true, true).filter(p => p.status === 'active').toArray();
@@ -164,31 +203,36 @@ async function reportXlsx(r) {
     ['Статус', r.period.status === 'closed' ? 'Закрыт' : 'Открыт'],
     ...(r.period.revision ? [['Редакция', r.period.revision]] : []),
     [],
-    ['Выдано авансом', xlsMoney(r.issued)],
-    ['Израсходовано', xlsMoney(r.spent)],
-    ['в т.ч. услуги', xlsMoney(r.services)],
-    ['в т.ч. без документов', xlsMoney(r.noDoc)],
-    ['Сторно, не учитывается', xlsMoney(r.stornoSum)],
-    ['Возвращено в кассу', xlsMoney(r.ret)],
+    ...settlementRows(r).map(row => [row.label, xlsMoney(row.value)]),
     [balanceLabel(r), xlsMoney(Math.abs(r.balance))],
+    ...(r.debtEnd ? [[debtEndLabel(r), xlsMoney(r.debtEnd)]] : []),
     [],
     ['Выдачи'],
     ...r.advances.map(a => [`${dFull(a.date)}, ${ADV_METHOD[a.method]}, ${a.by}`, xlsMoney(a.amount)]),
-  ], [34, 40]);
+    ...(r.returns.length ? [[], ['Возвраты в кассу'], ...r.returns.map(x => [`${dFull(x.dt)}, ${PAY[x.method]}, ${x.to}`, xlsMoney(x.amount)])] : []),
+  ], [40, 40]);
 
   addSheet(wb, 'Реестр', [
-    ['№', 'Дата', 'Тип', 'Товар / услуга', 'Документ', 'Оплата', 'Сумма', 'Комментарий'],
-    ...r.active.map(p => [pad3(p.no), date(p), p.type === 'service' ? 'Услуга' : 'Товар', p.title, DOC[p.docType], PAY[p.payment], xlsMoney(p.amount), p.comment]),
-    ['Итого', '', '', '', '', '', xlsMoney(r.spent)],
-  ], [7, 11, 8, 40, 15, 11, 14, 30]);
+    ['№', 'Дата', 'Тип', 'Товар / услуга', 'Документ', 'Оплата', 'Сумма', 'В долг', 'Комментарий'],
+    ...r.active.map(p => [pad3(p.no), date(p), p.type === 'service' ? 'Услуга' : 'Товар', p.title, DOC[p.docType], PAY[p.payment], xlsMoney(p.amount), debtOf(p) ? xlsMoney(debtOf(p)) : '', p.comment]),
+    ['Итого', '', '', '', '', '', xlsMoney(r.bought), r.onDebt ? xlsMoney(r.onDebt) : ''],
+  ], [7, 11, 8, 40, 15, 11, 14, 14, 30]);
 
   addSheet(wb, 'Позиции', [
     ['№ закупки', 'Дата', 'Наименование', 'Ед.', 'Кол-во', 'Цена', 'Сумма'],
     ...r.active.flatMap(p => (p.items.length
       ? p.items.map(i => [pad3(p.no), date(p), i.name, i.unit, i.qty, xlsMoney(i.price), xlsMoney(i.sum)])
       : [[pad3(p.no), date(p), `${p.title}: позиции не внесены`, '', '', '', xlsMoney(p.amount)]])),
-    ['Итого', '', '', '', '', '', xlsMoney(r.spent)],
+    ['Итого', '', '', '', '', '', xlsMoney(r.bought)],
   ], [10, 11, 42, 7, 9, 13, 14]);
+
+  if (r.repayments.length) {
+    addSheet(wb, 'Погашения', [
+      ['Дата', 'За что', 'Способ', 'Сумма', 'Комментарий'],
+      ...r.repayments.map(x => [dFull(x.dt), repaymentSubject(x, r.period.id), PAY[x.method], xlsMoney(x.amount), x.comment]),
+      ['Итого', '', '', xlsMoney(r.repaid)],
+    ], [11, 50, 11, 14, 30]);
+  }
 
   addSheet(wb, 'Сторно', [
     ['№', 'Дата', 'Товар / услуга', 'Сумма', 'Причина'],
@@ -279,6 +323,7 @@ function pdfRegistryRows(r) {
       { content: money(i.sum), styles: right },
     ]);
     if (!p.items.length) rows.push(['', { content: 'Позиции не внесены', colSpan: 5, styles: { textColor: [90, 103, 116] } }]);
+    if (debtOf(p)) rows.push(['', { content: `В долг: оплачено сразу ${money(p.paidNow)}, долг ${money(debtOf(p))}`, colSpan: 5, styles: { textColor: [90, 103, 116] } }]);
     return [head, ...rows];
   });
 }
@@ -309,15 +354,38 @@ async function reportPdf(r) {
     showFoot: 'lastPage',
   });
 
+  if (r.returns.length) {
+    y = pdfHeading(doc, y, 'Возвраты в кассу');
+    y = pdfTable(doc, {
+      startY: y,
+      head: [['Дата', 'Способ', 'Кому', { content: 'Сумма', styles: right }]],
+      body: r.returns.map(x => [dFull(x.dt), PAY[x.method], x.to, { content: money(x.amount), styles: right }]),
+      foot: [[{ content: 'Итого возвращено', colSpan: 3 }, { content: money(r.returned), styles: right }]],
+      showFoot: 'lastPage',
+    });
+  }
+
   y = pdfHeading(doc, y, 'Реестр закупок');
   y = pdfTable(doc, {
     startY: y,
     head: [['№', 'Дата', 'Товар / услуга', 'Документ', 'Оплата', { content: 'Сумма', styles: right }]],
     body: pdfRegistryRows(r),
-    foot: [[{ content: 'Итого без сторно', colSpan: 5 }, { content: money(r.spent), styles: right }]],
+    foot: [[{ content: 'Итого без сторно', colSpan: 5 }, { content: money(r.bought), styles: right }]],
     showFoot: 'lastPage',
     columnStyles: { 0: { cellWidth: 10 }, 1: { cellWidth: 20 }, 3: { cellWidth: 26 }, 4: { cellWidth: 19 }, 5: { cellWidth: 24 } },
   });
+
+  if (r.repayments.length) {
+    y = pdfHeading(doc, y, 'Погашение долгов из аванса');
+    y = pdfTable(doc, {
+      startY: y,
+      head: [['Дата', 'За что', 'Способ', { content: 'Сумма', styles: right }]],
+      body: r.repayments.map(x => [dFull(x.dt), repaymentSubject(x, r.period.id), PAY[x.method], { content: money(x.amount), styles: right }]),
+      foot: [[{ content: 'Итого погашено', colSpan: 3 }, { content: money(r.repaid), styles: right }]],
+      showFoot: 'lastPage',
+      columnStyles: { 0: { cellWidth: 20 }, 2: { cellWidth: 19 }, 3: { cellWidth: 24 } },
+    });
+  }
 
   if (r.noDocList.length) {
     y = pdfHeading(doc, y, 'Без документов');
@@ -345,11 +413,9 @@ async function reportPdf(r) {
   y = pdfTable(doc, {
     startY: y,
     body: [
-      ['Выдано авансом', { content: money(r.issued), styles: right }],
-      ['Израсходовано', { content: money(r.spent), styles: right }],
-      ['в т.ч. услуги', { content: money(r.services), styles: right }],
-      ['Возвращено в кассу', { content: money(r.ret), styles: right }],
+      ...settlementRows(r).filter(row => row.key !== 'storno' && row.key !== 'noDoc').map(row => [row.label, { content: money(row.value), styles: right }]),
       [{ content: balanceLabel(r), styles: { fontStyle: 'bold' } }, { content: `${money(Math.abs(r.balance))} сом`, styles: { ...right, fontStyle: 'bold' } }],
+      ...(r.debtEnd ? [[debtEndLabel(r), { content: money(r.debtEnd), styles: right }]] : []),
     ],
   });
 
@@ -447,6 +513,7 @@ async function readBackup(file) {
     tables.purchases.forEach(migratePurchaseV2);
     tables.bazaars = BAZAARS.map((name, i) => ({ id: i + 1, name, active: true }));
   }
+  if (tables && data.schemaVersion < 4 && Array.isArray(tables.periods)) migrateTablesV4(tables);
   if (!tables || db.tables.some(table => !Array.isArray(tables[table.name]))) throw new BackupError('Файл бэкапа неполный.');
 
   const photos = [];
@@ -463,13 +530,33 @@ async function readBackup(file) {
 const ARCHIVE_PHOTO_SIDE = 1100;
 const ARCHIVE_PHOTO_QUALITY = 0.5;
 
+// Архивируются закрытые периоды без непогашенных долгов. Погашение и его закупка уходят в архив только вместе:
+// иначе после загрузки архива долг выглядел бы снова неоплаченным.
+async function archivablePeriods() {
+  const closed = await db.periods.where('status').equals('closed').toArray();
+  const ids = new Set(closed.map(p => p.id));
+  const purchasePeriod = new Map((await db.purchases.toArray()).map(p => [p.id, p.periodId]));
+  (await getDebts()).forEach(d => ids.delete(d.periodId));
+  const links = (await db.repayments.toArray()).map(r => [r.periodId, purchasePeriod.get(r.purchaseId)]);
+  for (let changed = true; changed;) {
+    changed = false;
+    for (const [a, b] of links) {
+      if (ids.has(a) === ids.has(b)) continue;
+      ids.delete(a);
+      ids.delete(b);
+      changed = true;
+    }
+  }
+  return { periods: closed.filter(p => ids.has(p.id)), kept: closed.filter(p => !ids.has(p.id)) };
+}
+
 async function closedPeriodsData() {
-  const periods = await db.periods.where('status').equals('closed').toArray();
+  const { periods, kept } = await archivablePeriods();
   const periodIds = periods.map(p => p.id);
   const purchases = await db.purchases.where('periodId').anyOf(periodIds).toArray();
   const purchaseIds = purchases.map(p => p.id);
   const photos = await db.photos.where('purchaseId').anyOf(purchaseIds).toArray();
-  return { periods, periodIds, purchases, purchaseIds, photos, size: photos.reduce((sum, p) => sum + p.blob.size, 0) };
+  return { periods, kept, periodIds, purchases, purchaseIds, photos, size: photos.reduce((sum, p) => sum + p.blob.size, 0) };
 }
 
 async function buildArchive(onProgress) {
@@ -498,6 +585,8 @@ async function buildArchive(onProgress) {
     purchases,
     photos: photoRows,
     advances: await db.advances.where('periodId').anyOf(periodIds).toArray(),
+    returns: await db.returns.where('periodId').anyOf(periodIds).toArray(),
+    repayments: await db.repayments.where('periodId').anyOf(periodIds).toArray(),
     suppliers: await db.suppliers.where('id').anyOf(purchases.map(p => p.supplierId)).toArray(),
     auditLog: await db.auditLog.filter(e => (e.entity === 'purchase' && purchaseIds.includes(e.entityId)) || (e.entity === 'period' && periodIds.includes(e.entityId))).toArray(),
   };
@@ -526,7 +615,8 @@ async function readArchive(file) {
   if (data.kind !== 'archive') throw new BackupError('Это не файл архива. Бэкап восстанавливается кнопкой «Восстановить из копии».');
   if (!(data.schemaVersion >= 1 && data.schemaVersion <= db.verno)) throw new BackupError('Архив сделан другой версией приложения.');
   const { tables } = data;
-  const parts = ['periods', 'advances', 'purchases', 'photos', 'suppliers', 'auditLog'];
+  if (tables && data.schemaVersion < 4 && Array.isArray(tables.periods)) migrateTablesV4(tables);
+  const parts = ['periods', 'advances', 'purchases', 'photos', 'suppliers', 'returns', 'repayments', 'auditLog'];
   if (!tables || parts.some(part => !Array.isArray(tables[part]))) throw new BackupError('Файл архива неполный.');
   const photos = [];
   for (const { file: name, ...meta } of tables.photos) {

@@ -67,7 +67,7 @@ h1,h2,h3{font-family:var(--f-display);margin:0;text-wrap:balance;letter-spacing:
 .stack{display:flex;flex-direction:column;gap:12px}
 .row{display:flex;align-items:center;gap:10px}
 .spacer{flex:1}
-#ua-note:empty,#f-photo-list:empty,#ar-note:empty,#q-list:empty,#h-notes:empty,#f-over:empty,#f-warn:empty,#f-goods-list:empty,#i-notes:empty,#r-notes:empty,#cl-notes:empty,#cl-left:empty,#r-reopen:empty{display:none}
+#ua-note:empty,#p-over:empty,#a-note:empty,#f-photo-list:empty,#ar-note:empty,#q-list:empty,#h-notes:empty,#f-over:empty,#f-warn:empty,#f-goods-list:empty,#i-notes:empty,#r-notes:empty,#cl-notes:empty,#cl-left:empty,#r-reopen:empty{display:none}
 .struck{text-decoration:line-through}
 
 /* top bar */
@@ -84,13 +84,17 @@ h1,h2,h3{font-family:var(--f-display);margin:0;text-wrap:balance;letter-spacing:
   background:repeating-linear-gradient(45deg,currentColor 0 2px,transparent 2px 9px),repeating-linear-gradient(-45deg,currentColor 0 2px,transparent 2px 9px);
   -webkit-mask:linear-gradient(105deg,transparent 45%,#000 100%);mask:linear-gradient(105deg,transparent 45%,#000 100%)}
 .plate .label{color:var(--plate-muted)}
-.bal{font-family:var(--f-display);font-weight:700;font-size:44px;line-height:1.05;margin:6px 0 2px;font-variant-numeric:tabular-nums;letter-spacing:-.01em}
+.bal{font-family:var(--f-display);font-weight:700;font-size:44px;line-height:1.05;margin:6px 0 2px;font-variant-numeric:tabular-nums;letter-spacing:-.01em;display:block;border:0;background:none;color:inherit;padding:0;text-align:left;cursor:pointer;min-height:44px}
 .bal small{font-size:20px;font-weight:600;margin-left:4px;color:var(--plate-muted)}
+.bal .chev{font-size:26px;margin-left:6px}
 .bal.neg{color:#FF9C8F}
 /* rgba вместо color-mix: color-mix есть только с iOS 16.2 */
 .plate-meta{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:14px;padding-top:12px;border-top:1px solid rgba(242,245,248,.18)}
-.plate-meta div{display:flex;flex-direction:column;gap:2px}
-.plate-meta b{font-family:var(--f-mono);font-weight:500;font-size:15px;font-variant-numeric:tabular-nums}
+.plate-meta button{display:flex;flex-direction:column;gap:2px;align-items:flex-start;min-width:0;min-height:44px;border:0;background:none;color:inherit;padding:2px 0;text-align:left;cursor:pointer;position:relative;z-index:1}
+.plate-meta b{font-family:var(--f-mono);font-weight:500;font-size:15px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.plate-meta b.debt{color:#F5C26B}
+.chev{color:var(--muted);font-weight:400;margin-left:4px}
+.plate .chev{color:var(--plate-muted)}
 .pill{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;padding:3px 9px;border-radius:999px;background:rgba(242,245,248,.14)}
 
 /* buttons */
@@ -101,6 +105,8 @@ h1,h2,h3{font-family:var(--f-display);margin:0;text-wrap:balance;letter-spacing:
 .btn:disabled{opacity:.45;cursor:not-allowed}
 .btn:focus-visible,.chip:focus-within,.tab:focus-visible,.back:focus-visible,.item:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .btn-row{display:grid;grid-template-columns:1.4fr 1fr;gap:10px}
+.actions{display:grid;grid-template-columns:1.3fr 1fr 1fr;gap:8px}
+.actions .btn{padding-inline:8px}
 .btn.full{width:100%}
 
 /* banners */
@@ -201,6 +207,9 @@ textarea.input{min-height:70px;resize:vertical}
 .kv div:first-child{border-top:0}
 .kv dt{color:var(--muted);margin:0}
 .kv dd{margin:0;text-align:right;font-weight:500;min-width:0}
+.kv .link{cursor:pointer;min-height:44px;align-items:center}
+.kv .link dd{color:var(--accent);font-weight:600}
+.kv dd a{color:var(--accent);font-weight:600;text-decoration:none}
 .amount-hero{font-family:var(--f-display);font-weight:700;font-size:38px;font-variant-numeric:tabular-nums}
 .ph-none{display:flex;align-items:center;gap:10px;padding:14px;border:1px dashed var(--line);border-radius:12px;color:var(--muted);font-size:14px}
 .photo-full{width:100%;border-radius:12px;border:1px solid var(--line)}
@@ -218,8 +227,10 @@ tfoot td{font-weight:600}
 
 /* report */
 .sum{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:4px 14px}
-.sum div{display:flex;justify-content:space-between;padding:10px 0;border-top:1px solid var(--line);gap:10px}
-.sum div:first-child{border-top:0}
+.sum>*{display:flex;justify-content:space-between;padding:10px 0;border-top:1px solid var(--line);gap:10px}
+.sum>:first-child{border-top:0}
+.sum>button{width:100%;min-height:44px;border:0;border-top:1px solid var(--line);background:none;text-align:left;cursor:pointer;align-items:center}
+.sum>button:first-child{border-top:0}
 .sum .v{font-family:var(--f-mono);font-variant-numeric:tabular-nums;white-space:nowrap}
 .sum .total{font-weight:700}
 .sum .total .v{font-size:17px}
@@ -262,6 +273,10 @@ tfoot td{font-weight:600}
 .rank-bar{height:8px;display:flex}
 .rank-bar i{display:block;height:100%;min-width:3px;background:var(--viz-1);border-radius:0 4px 4px 0}
 .rank-bar i.other{background:var(--muted)}
+.rank>button{display:block;width:100%;border:0;background:none;padding:4px 0;text-align:left;cursor:pointer;min-height:44px}
+.legend button{display:flex;align-items:center;gap:8px;width:100%;border:0;background:none;padding:0;text-align:left;cursor:pointer;min-height:44px}
+.stat>button.stat-head{border:0;background:none;padding:0;text-align:left;cursor:pointer;width:100%}
+tr[data-open]{cursor:pointer}
 .export{display:grid;grid-template-columns:1fr 1fr;gap:10px}
 .ready{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(84px + env(safe-area-inset-bottom,0px));width:calc(100% - 32px);max-width:428px;z-index:21;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:12px;display:flex;flex-direction:column;gap:10px;box-shadow:0 6px 20px rgba(0,0,0,.25);font-size:14px}
 
@@ -292,16 +307,14 @@ tfoot td{font-weight:600}
   <div class="brand"><h1>Подотчёт</h1><span class="org" id="h-org"></span><span class="spacer"></span><span class="label" id="h-date"></span></div>
   <div class="plate">
     <div class="row"><span class="label">Остаток аванса</span><span class="spacer"></span><span class="pill" id="h-period"></span></div>
-    <div class="bal" id="h-bal"></div>
-    <div class="plate-meta">
-      <div><span class="label">Выдано</span><b id="h-in"></b></div>
-      <div><span class="label">Израсходовано</span><b id="h-out"></b></div>
-    </div>
+    <button class="bal" id="h-bal" type="button"></button>
+    <div class="plate-meta" id="h-meta"></div>
   </div>
   <button class="btn primary full" id="b-newp" type="button" hidden>Открыть новый период</button>
-  <div class="btn-row" id="h-actions">
+  <div class="actions" id="h-actions">
     <button class="btn primary" id="b-new" type="button"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>Закупка</button>
     <button class="btn" id="b-adv" type="button">+ Выдача</button>
+    <button class="btn" id="b-ret" type="button">Возврат</button>
   </div>
   <div id="h-notes" class="stack"></div>
   <button class="btn full" id="b-search" type="button"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></svg>Поиск закупок</button>
@@ -354,6 +367,9 @@ tfoot td{font-weight:600}
   <div id="f-over"></div>
   <div class="field"><span class="label">Документ</span><div class="chips" id="f-doc"></div></div>
   <div class="field"><span class="label">Оплата</span><div class="chips" id="f-pay"></div></div>
+  <div class="field" id="f-paid-field" hidden><label class="label" for="f-paid">Оплачено сразу, сом</label>
+    <input class="input" id="f-paid" inputmode="decimal" placeholder="0" autocomplete="off">
+    <span class="muted hint" id="f-debt-hint"></span></div>
   <div class="field" id="f-receipt-block"><span class="label">Фото чека</span>
     <div class="thumbs" id="f-photo-list"></div>
     <label class="photo" for="f-photo">
@@ -386,7 +402,7 @@ tfoot td{font-weight:600}
 
 <!-- CARD -->
 <section id="v-card" class="stack" hidden>
-  <div class="top"><button class="back" type="button" id="c-back" data-go="home">‹ Назад</button><h2 id="c-title"></h2></div>
+  <div class="top"><button class="back" type="button" id="c-back" data-go="back">‹ Назад</button><h2 id="c-title"></h2></div>
   <div id="c-body" class="stack"></div>
 </section>
 
@@ -400,15 +416,52 @@ tfoot td{font-weight:600}
 
 <!-- ADVANCE -->
 <section id="v-adv" class="stack" hidden>
-  <div class="top"><button class="back" type="button" data-go="home">‹ Назад</button><h2>Выдача аванса</h2></div>
+  <div class="top"><button class="back" type="button" data-go="back">‹ Назад</button><h2 id="a-title">Выдача аванса</h2></div>
   <div class="field"><label class="label" for="a-amount">Сумма, сом</label>
     <input class="input big" id="a-amount" inputmode="decimal" placeholder="0" autocomplete="off"></div>
+  <div id="a-note"></div>
   <div class="field"><span class="label">Способ</span><div class="chips" id="a-method"></div></div>
-  <div class="field"><label class="label" for="a-by">Кто выдал</label>
+  <div class="field"><label class="label" for="a-by" id="a-by-label">Кто выдал</label>
     <input class="input" id="a-by" autocomplete="off"></div>
   <div class="field"><label class="label" for="a-date">Дата</label>
     <input class="input" id="a-date" type="date"></div>
+  <div class="field" id="a-comment-field"><label class="label" for="a-comment">Комментарий</label>
+    <textarea class="input" id="a-comment" placeholder="Необязательно"></textarea></div>
   <button class="btn primary full" type="button" id="a-save">Добавить выдачу</button>
+</section>
+
+<!-- DRILL-DOWN LIST -->
+<section id="v-list" class="stack" hidden>
+  <div class="top"><button class="back" type="button" data-go="back">‹ Назад</button><h2 id="ls-title"></h2></div>
+  <div id="ls-body" class="stack"></div>
+</section>
+
+<!-- SUPPLIER -->
+<section id="v-supplier" class="stack" hidden>
+  <div class="top"><button class="back" type="button" data-go="back">‹ Назад</button><h2 id="sp-title"></h2></div>
+  <div id="sp-body" class="stack"></div>
+</section>
+
+<!-- ADVANCE / RETURN / REPAYMENT CARD -->
+<section id="v-entry" class="stack" hidden>
+  <div class="top"><button class="back" type="button" data-go="back">‹ Назад</button><h2 id="e-title"></h2></div>
+  <div id="e-body" class="stack"></div>
+</section>
+
+<!-- REPAY DEBT -->
+<section id="v-repay" class="stack" hidden>
+  <div class="top"><button class="back" type="button" data-go="back">‹ Назад</button><h2>Погашение долга</h2></div>
+  <div class="sum" id="p-sum"></div>
+  <div class="field"><label class="label" for="p-amount">Сумма, сом</label>
+    <input class="input big" id="p-amount" inputmode="decimal" placeholder="0" autocomplete="off"></div>
+  <div id="p-over"></div>
+  <div class="field"><span class="label">Способ</span><div class="chips" id="p-method"></div></div>
+  <div class="field"><label class="label" for="p-date">Дата</label>
+    <input class="input" id="p-date" type="date"></div>
+  <div class="field"><label class="label" for="p-comment">Комментарий</label>
+    <textarea class="input" id="p-comment" placeholder="Необязательно"></textarea></div>
+  <button class="btn primary full" type="button" id="p-save">Сохранить погашение</button>
+  <p class="muted hint" id="p-hint"></p>
 </section>
 
 <!-- ITEMS -->
@@ -499,7 +552,7 @@ tfoot td{font-weight:600}
 
 <!-- DICTIONARY ENTRY -->
 <section id="v-dict" class="stack" hidden>
-  <div class="top"><button class="back" type="button" data-go="more">‹ Настройки</button><h2 id="d-title"></h2></div>
+  <div class="top"><button class="back" type="button" data-go="back">‹ Назад</button><h2 id="d-title"></h2></div>
   <div class="field"><label class="label" for="d-name">Название</label><input class="input" id="d-name" autocomplete="off"></div>
   <div id="d-sup-fields" class="stack">
     <div class="field"><label class="label" for="d-place">Базар</label><input class="input" id="d-place" autocomplete="off"></div>
@@ -508,7 +561,6 @@ tfoot td{font-weight:600}
   </div>
   <label class="switch" for="d-hide"><span>В архиве, не предлагать при закупке</span><input type="checkbox" id="d-hide"></label>
   <button class="btn primary full" type="button" id="d-save">Сохранить</button>
-  <div id="d-photos" class="stack" hidden></div>
 </section>
 
 <!-- RESTORE -->
