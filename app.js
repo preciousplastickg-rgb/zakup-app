@@ -365,8 +365,69 @@ if (ANDROID) {
 
 // iOS держит приложение в памяти днями: дата в шапке не должна застывать.
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden && !$('v-home').hidden) renderHome();
+  if (document.hidden) return;
+  if (!$('v-home').hidden) renderHome();
+  checkForUpdate().catch(() => {});
 });
+
+/* Обновление. Новый service worker сам скачивает файлы и берёт страницу (skipWaiting + claim),
+   но уже открытый экран работает на старом коде. Перезагрузку человек выбирает сам: так не пропадёт введённое. */
+
+let swRegistration = null;
+let updateArmedAt = 0;
+
+// Без интернета update() отклоняется: это не ошибка, проверим в следующий раз.
+const checkForUpdate = () => (swRegistration ? swRegistration.update() : Promise.resolve());
+
+async function watchUpdates() {
+  if (!('serviceWorker' in navigator)) return;
+  // Самая первая установка тоже меняет controller, но обновлять там нечего.
+  const hadController = !!navigator.serviceWorker.controller;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (hadController) $('update').hidden = false;
+  });
+  swRegistration = await navigator.serviceWorker.register('./sw.js');
+}
+
+$('update-do').onclick = () => {
+  const since = Date.now() - updateArmedAt;
+  if (currentView && hasUnsavedInput() && (since < DOUBLE_TAP_MS || since > LEAVE_CONFIRM_MS)) {
+    if (since > LEAVE_CONFIRM_MS) {
+      updateArmedAt = Date.now();
+      toast('Введённое не сохранено. Сохраните его или нажмите «Обновить» ещё раз.');
+    }
+    return;
+  }
+  location.reload();
+};
+$('update-later').onclick = () => { $('update').hidden = true; };
+
+// Номер версии — имя кэша service worker: так он записан в одном месте, в sw.js.
+async function installedVersion() {
+  if (!('caches' in window)) return '';
+  const versions = (await caches.keys()).map(key => /^zakup-v(\d+)$/.exec(key)).filter(Boolean).map(m => Number(m[1]));
+  return versions.length ? `v${Math.max(...versions)}` : '';
+}
+
+$('s-update').onclick = async e => {
+  const button = e.currentTarget;
+  if (!swRegistration) {
+    toast('Обновление проверяется только в установленном приложении.');
+    return;
+  }
+  if (!$('update').hidden) return;
+  button.disabled = true;
+  try {
+    await checkForUpdate();
+  } catch {
+    toast('Нет связи. Проверьте интернет и попробуйте ещё раз.');
+    return;
+  } finally {
+    button.disabled = false;
+  }
+  if (swRegistration.installing || swRegistration.waiting) toast('Загружается обновление. Через несколько секунд появится кнопка «Обновить».', 5000);
+  else if ($('update').hidden) toast('Установлена последняя версия.');
+};
 
 /* Главная */
 
@@ -2398,6 +2459,8 @@ async function showMore() {
   const photoSize = await db.photos.toArray().then(list => list.reduce((sum, p) => sum + p.blob.size, 0));
   const closedCount = await db.periods.where('status').equals('closed').count();
   $('s-usage').textContent = `Фото занимают ${formatSize(photoSize)}. Закрытых периодов: ${closedCount}.`;
+  const version = await installedVersion();
+  $('s-version').textContent = `Версия ${version || 'не установлена'}. Обновления скачиваются сами, когда есть интернет.`;
   $('s-backup-note').textContent = `Данные хранятся только на этом телефоне. Последняя копия: ${lastBackupAt ? dFull(lastBackupAt) : 'ещё не делалась'}.`;
   $('s-baz').innerHTML = bazaars.sort(byName).map(b =>
     `<button class="item plain" type="button" data-dict="bazaar" data-id="${b.id}"><span class="t">${esc(b.name)}${b.active ? '' : '<span class="tag warn">архив</span>'}</span></button>`
@@ -2780,7 +2843,7 @@ window.addEventListener('unhandledrejection', e => {
 
 async function start() {
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(console.error);
-  if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(console.error);
+  watchUpdates().catch(console.error);
   try {
     await db.open();
     await showHome();

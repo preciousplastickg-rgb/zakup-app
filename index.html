@@ -547,6 +547,9 @@ tr[data-open]{cursor:pointer}
   <label class="btn full" for="s-unarchive">Загрузить архив</label>
   <input class="file-input" type="file" id="s-unarchive" accept=".zip,application/zip" tabindex="-1" aria-label="Файл архива">
   <button class="btn full" type="button" id="s-log">Журнал изменений</button>
+  <div class="section-h"><h3>Приложение</h3></div>
+  <p class="muted hint" id="s-version"></p>
+  <button class="btn full" type="button" id="s-update">Проверить обновление</button>
   <button class="btn danger full" type="button" id="s-wipe">Удалить все записи</button>
 </section>
 
@@ -617,6 +620,7 @@ tr[data-open]{cursor:pointer}
   <button class="tab" type="button" data-go="more"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h10"/></svg>Настройки</button>
 </div></nav>
 <div class="ready" id="ready" hidden><span id="ready-name"></span><button class="btn primary full" type="button" id="ready-send">Отправить файл</button><button class="btn full" type="button" id="ready-close" hidden>Закрыть</button></div>
+<div class="ready" id="update" hidden><span><b>Вышло обновление.</b> Оно уже загружено, нажмите «Обновить», чтобы перейти на новую версию.</span><div class="btn-row"><button class="btn primary" type="button" id="update-do">Обновить</button><button class="btn" type="button" id="update-later">Позже</button></div></div>
 <div class="toast" id="toast" hidden></div>
 
 <script src="vendor/dexie.min.js"></script>
