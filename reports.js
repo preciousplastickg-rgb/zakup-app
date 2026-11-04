@@ -173,8 +173,8 @@ const debtEndLabel = r => `Долг поставщикам на ${dFull(r.end)},
 
 // Статистика за даты идёт через все отчётные периоды.
 async function purchasesBetween(from, to) {
-  const list = await db.purchases.where('dt').between(from, `${to}T99`, true, true).filter(p => p.status === 'active').toArray();
-  return withSuppliers(list);
+  const list = await db.purchases.where('dt').between(from, `${to}T99`, true, true).toArray();
+  return withSuppliers(list.filter(p => p.status === 'active'));
 }
 
 const balanceLabel = r => (r.balance < 0 ? 'Перерасход' : 'Остаток');
@@ -439,11 +439,10 @@ async function reportPdf(r) {
 
 // Приложение: фото документов, одно на страницу. Фото товара в PDF не входят. null, если фото нет.
 async function photosPdf(r) {
-  const shots = [];
-  for (const purchase of r.active) {
-    const photos = await db.photos.where('purchaseId').equals(purchase.id).filter(p => p.kind === 'receipt').toArray();
-    photos.forEach(photo => shots.push({ purchase, blob: photo.blob }));
-  }
+  const photos = await db.photos.where('purchaseId').anyOf(r.active.map(p => p.id)).filter(p => p.kind === 'receipt').toArray();
+  const byPurchase = new Map();
+  photos.forEach(photo => byPurchase.set(photo.purchaseId, [...(byPurchase.get(photo.purchaseId) || []), photo]));
+  const shots = r.active.flatMap(purchase => (byPurchase.get(purchase.id) || []).map(photo => ({ purchase, blob: photo.blob })));
   if (!shots.length) return null;
 
   const doc = await newPdf(`Фото документов ${r.period.number}`);
@@ -467,8 +466,42 @@ async function photosPdf(r) {
 
 /* Бэкап */
 
-// Счётчик снимков ведётся по году и номеру, а не по закупке: после загрузки архива номер может
-// встретиться у двух закупок, и их фото не должны затирать друг друга.
+// Имя снимка в zip: photos/<год>-<номер>_<n>.jpg. Счётчик ведётся по году и номеру, а не по закупке:
+// после загрузки архива номер может встретиться у двух закупок, и их фото не должны затирать друг друга.
+function photoNamer(purchases) {
+  const byId = new Map(purchases.map(p => [p.id, p]));
+  const counts = new Map();
+  return purchaseId => {
+    const { year, no } = byId.get(purchaseId);
+    const base = `${year}-${pad3(no)}`;
+    const n = (counts.get(base) || 0) + 1;
+    counts.set(base, n);
+    return `photos/${base}_${n}.jpg`;
+  };
+}
+
+// Открывает zip бэкапа или архива. notOurs — что сказать, если это чужой файл.
+async function openZip(file, notOurs) {
+  await loadVendor('vendor/jszip.min.js');
+  try {
+    const zip = await JSZip.loadAsync(file);
+    return { zip, data: JSON.parse(await zip.file('data.json').async('string')) };
+  } catch {
+    throw new BackupError(notOurs);
+  }
+}
+
+// Снимки из zip обратно в записи с Blob. Не хватает хотя бы одного — файл не принимается целиком.
+async function unzipPhotos(zip, rows, missing) {
+  const photos = [];
+  for (const { file: name, ...meta } of rows) {
+    const entry = typeof name === 'string' ? zip.file(name) : null;
+    if (!entry) throw new BackupError(missing);
+    photos.push({ ...meta, blob: new Blob([await entry.async('uint8array')], { type: 'image/jpeg' }) });
+  }
+  return photos;
+}
+
 async function buildBackup() {
   await loadVendor('vendor/jszip.min.js');
   const zip = new JSZip();
@@ -476,15 +509,10 @@ async function buildBackup() {
   for (const table of db.tables) {
     if (table.name !== 'photos') tables[table.name] = await table.toArray();
   }
-  const purchases = new Map(tables.purchases.map(p => [p.id, p]));
-  const perPurchase = new Map();
+  const photoName = photoNamer(tables.purchases);
   tables.photos = [];
   await db.photos.each(({ blob, ...meta }) => {
-    const { year, no } = purchases.get(meta.purchaseId);
-    const base = `${year}-${pad3(no)}`;
-    const n = (perPurchase.get(base) || 0) + 1;
-    perPurchase.set(base, n);
-    const file = `photos/${base}_${n}.jpg`;
+    const file = photoName(meta.purchaseId);
     zip.file(file, blob);
     tables.photos.push({ ...meta, file });
   });
@@ -497,15 +525,7 @@ async function buildBackup() {
 // Разбирает и проверяет файл целиком до того, как что-либо будет изменено.
 // Копии старых версий схемы приводятся здесь к текущей.
 async function readBackup(file) {
-  await loadVendor('vendor/jszip.min.js');
-  let zip;
-  let data;
-  try {
-    zip = await JSZip.loadAsync(file);
-    data = JSON.parse(await zip.file('data.json').async('string'));
-  } catch {
-    throw new BackupError('Это не файл бэкапа.');
-  }
+  const { zip, data } = await openZip(file, 'Это не файл бэкапа.');
   if (data.kind === 'archive') throw new BackupError('Это файл архива. Он загружается кнопкой «Загрузить архив».');
   if (!(data.schemaVersion >= 1 && data.schemaVersion <= db.verno)) throw new BackupError('Копия сделана другой версией приложения.');
   const { tables } = data;
@@ -515,13 +535,7 @@ async function readBackup(file) {
   }
   if (tables && data.schemaVersion < 4 && Array.isArray(tables.periods)) migrateTablesV4(tables);
   if (!tables || db.tables.some(table => !Array.isArray(tables[table.name]))) throw new BackupError('Файл бэкапа неполный.');
-
-  const photos = [];
-  for (const { file: name, ...meta } of tables.photos) {
-    const entry = typeof name === 'string' ? zip.file(name) : null;
-    if (!entry) throw new BackupError('В файле бэкапа не хватает фото.');
-    photos.push({ ...meta, blob: new Blob([await entry.async('uint8array')], { type: 'image/jpeg' }) });
-  }
+  const photos = await unzipPhotos(zip, tables.photos, 'В файле бэкапа не хватает фото.');
   return { exportedAt: data.exportedAt, tables: { ...tables, photos } };
 }
 
@@ -563,19 +577,14 @@ async function buildArchive(onProgress) {
   await loadVendor('vendor/jszip.min.js');
   const { periods, periodIds, purchases, purchaseIds, photos, size } = await closedPeriodsData();
   const zip = new JSZip();
-  const byId = new Map(purchases.map(p => [p.id, p]));
-  const perPurchase = new Map();
+  const photoName = photoNamer(purchases);
   const photoRows = [];
   let compressed = 0;
   for (const [i, { blob, ...meta }] of photos.entries()) {
     onProgress(i + 1, photos.length);
     const smaller = await compressPhoto(blob, ARCHIVE_PHOTO_SIDE, ARCHIVE_PHOTO_QUALITY);
     const best = smaller.size < blob.size ? smaller : blob;
-    const { year, no } = byId.get(meta.purchaseId);
-    const base = `${year}-${pad3(no)}`;
-    const n = (perPurchase.get(base) || 0) + 1;
-    perPurchase.set(base, n);
-    const file = `photos/${base}_${n}.jpg`;
+    const file = photoName(meta.purchaseId);
     zip.file(file, best);
     compressed += best.size;
     photoRows.push({ ...meta, file });
@@ -588,7 +597,7 @@ async function buildArchive(onProgress) {
     returns: await db.returns.where('periodId').anyOf(periodIds).toArray(),
     repayments: await db.repayments.where('periodId').anyOf(periodIds).toArray(),
     suppliers: await db.suppliers.where('id').anyOf(purchases.map(p => p.supplierId)).toArray(),
-    auditLog: await db.auditLog.filter(e => (e.entity === 'purchase' && purchaseIds.includes(e.entityId)) || (e.entity === 'period' && periodIds.includes(e.entityId))).toArray(),
+    auditLog: await db.auditLog.filter(auditOf(purchaseIds, periodIds)).toArray(),
   };
   zip.file('data.json', JSON.stringify({ kind: 'archive', schemaVersion: db.verno, exportedAt: nowLocal(), tables }), { compression: 'DEFLATE' });
   const out = await zip.generateAsync({ type: 'blob', compression: 'STORE', mimeType: 'application/zip' });
@@ -603,26 +612,13 @@ async function buildArchive(onProgress) {
 
 // Файл читается обратно до удаления из приложения: повреждённый архив не должен стоить данных.
 async function readArchive(file) {
-  await loadVendor('vendor/jszip.min.js');
-  let zip;
-  let data;
-  try {
-    zip = await JSZip.loadAsync(file);
-    data = JSON.parse(await zip.file('data.json').async('string'));
-  } catch {
-    throw new BackupError('Это не файл архива.');
-  }
+  const { zip, data } = await openZip(file, 'Это не файл архива.');
   if (data.kind !== 'archive') throw new BackupError('Это не файл архива. Бэкап восстанавливается кнопкой «Восстановить из копии».');
   if (!(data.schemaVersion >= 1 && data.schemaVersion <= db.verno)) throw new BackupError('Архив сделан другой версией приложения.');
   const { tables } = data;
   if (tables && data.schemaVersion < 4 && Array.isArray(tables.periods)) migrateTablesV4(tables);
   const parts = ['periods', 'advances', 'purchases', 'photos', 'suppliers', 'returns', 'repayments', 'auditLog'];
   if (!tables || parts.some(part => !Array.isArray(tables[part]))) throw new BackupError('Файл архива неполный.');
-  const photos = [];
-  for (const { file: name, ...meta } of tables.photos) {
-    const entry = typeof name === 'string' ? zip.file(name) : null;
-    if (!entry) throw new BackupError('В файле архива не хватает фото.');
-    photos.push({ ...meta, blob: new Blob([await entry.async('uint8array')], { type: 'image/jpeg' }) });
-  }
+  const photos = await unzipPhotos(zip, tables.photos, 'В файле архива не хватает фото.');
   return { exportedAt: data.exportedAt, tables: { ...tables, photos } };
 }

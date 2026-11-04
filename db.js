@@ -60,6 +60,10 @@ function migrateTablesV4(tables) {
   tables.repayments = [];
 }
 
+// Версия 5: индекс по оплате, чтобы долги находились без перебора всех закупок. Данные не меняются,
+// поэтому upgrade не нужен: индекс по уже записанным закупкам IndexedDB строит сама.
+db.version(5).stores({ purchases: '++id, &[periodId+year+no], periodId, dt, supplierId, purposeId, status, payment' });
+
 db.on('populate', tx => {
   seedBazaars(tx);
   tx.table('settings').add({ key: 'org', value: 'Азия Сталь' });
@@ -123,20 +127,13 @@ const getOpenPeriod = () => db.periods.where('status').equals('open').first();
 // Открытый период, а если его нет — последний закрытый: главная показывает его итог.
 const getCurrentPeriod = async () => (await getOpenPeriod()) || db.periods.toCollection().last();
 
-// Сторно обычно означает ошибку, поэтому значения по умолчанию из него не берутся.
 // Что куплено: позиции точнее наименования из формы, поэтому в списке и отчётах они важнее.
 const purchaseTitle = p => (p.items.length ? p.items.map(i => i.name).join(', ') : p.goodsName);
 
-const getLastPurchase = () => db.purchases.toCollection().reverse().filter(p => p.status === 'active').first();
-
-// Действующие закупки, новые первыми: из них строятся подсказки при вводе.
-const getRecentPurchases = () => db.purchases.toCollection().reverse().filter(p => p.status === 'active').toArray();
-
-// Отдельно от последней закупки: у услуги базара нет, и он не должен сбрасываться.
-async function getLastPlace() {
-  const purchase = await db.purchases.toCollection().reverse().filter(p => p.status === 'active' && p.place).first();
-  return purchase ? purchase.place : '';
-}
+// Действующие закупки, новые первыми: из них строятся подсказки и значения по умолчанию.
+// Сторно обычно означает ошибку, поэтому оно сюда не входит.
+// Фильтр после чтения, а не в запросе: Dexie с filter() идёт курсором по одной записи, это втрое медленнее.
+const getRecentPurchases = async () => (await db.purchases.toCollection().reverse().toArray()).filter(p => p.status === 'active');
 
 async function getSetting(key) {
   const row = await db.settings.get(key);
@@ -145,9 +142,8 @@ async function getSetting(key) {
 
 // Напоминание о бэкапе: больше 7 дней или больше 20 закупок с прошлого раза. null, если пока рано.
 async function backupReminder() {
-  const first = await db.purchases.orderBy('dt').first();
+  const [first, lastAt] = await Promise.all([db.purchases.orderBy('dt').first(), getSetting('lastBackupAt')]);
   if (!first) return null;
-  const lastAt = await getSetting('lastBackupAt');
   const days = Math.floor((Date.now() - new Date(lastAt || first.dt).getTime()) / 864e5);
   const count = await (lastAt ? db.purchases.where('dt').above(lastAt).count() : db.purchases.count());
   return days > BACKUP_MAX_DAYS || count > BACKUP_MAX_PURCHASES ? { days, count, never: !lastAt } : null;
@@ -170,10 +166,7 @@ const sumDebts = list => list.reduce((sum, p) => sum + debtOf(p), 0);
 // Вызывающая транзакция должна включать periods, advances, purchases, returns и repayments.
 async function periodSummary(period) {
   const of = table => (period ? table.where('periodId').equals(period.id).toArray() : []);
-  const advances = await of(db.advances);
-  const purchases = await of(db.purchases);
-  const returns = await of(db.returns);
-  const repayments = await of(db.repayments);
+  const [advances, purchases, returns, repayments] = await Promise.all([db.advances, db.purchases, db.returns, db.repayments].map(of));
   const active = purchases.filter(p => p.status === 'active');
   const issued = sumAmounts(advances);
   const bought = sumAmounts(active);
@@ -204,7 +197,7 @@ const repaidFor = async purchaseId => sumAmounts(await db.repayments.where('purc
 // until — день: долг на конец этого дня, без более поздних закупок и погашений.
 async function getDebts(until = null) {
   const inTime = x => !until || x.dt.slice(0, 10) <= until;
-  const purchases = await db.purchases.filter(p => debtOf(p) > 0 && inTime(p)).toArray();
+  const purchases = await db.purchases.where('payment').equals('debt').filter(p => debtOf(p) > 0 && inTime(p)).toArray();
   const repayments = await db.repayments.where('purchaseId').anyOf(purchases.map(p => p.id)).filter(inTime).toArray();
   return purchases
     .map(p => {
@@ -482,12 +475,19 @@ function deleteAdvance(id) {
   });
 }
 
+// Записи журнала о закупках и периодах, которые уходят в архив или возвращаются из него.
+function auditOf(purchaseIds, periodIds) {
+  const purchases = new Set(purchaseIds);
+  const periods = new Set(periodIds);
+  return e => (e.entity === 'purchase' && purchases.has(e.entityId)) || (e.entity === 'period' && periods.has(e.entityId));
+}
+
 // Закрытые периоды уходят в архивный файл. Счётчики не трогаем: номера не должны повториться.
 function removeArchivedPeriods(periodIds, label) {
   return db.transaction('rw', [db.periods, db.advances, db.purchases, db.photos, db.returns, db.repayments, db.auditLog], async () => {
     const purchaseIds = await db.purchases.where('periodId').anyOf(periodIds).primaryKeys();
     await db.photos.where('purchaseId').anyOf(purchaseIds).delete();
-    await db.auditLog.filter(e => (e.entity === 'purchase' && purchaseIds.includes(e.entityId)) || (e.entity === 'period' && periodIds.includes(e.entityId))).delete();
+    await db.auditLog.filter(auditOf(purchaseIds, periodIds)).delete();
     await db.purchases.where('periodId').anyOf(periodIds).delete();
     await db.advances.where('periodId').anyOf(periodIds).delete();
     await db.returns.where('periodId').anyOf(periodIds).delete();

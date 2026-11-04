@@ -26,22 +26,33 @@ const dShort = iso => { const [, m, d] = iso.slice(0, 10).split('-'); return `${
 const dFull = iso => { const [y, m, d] = iso.slice(0, 10).split('-'); return `${d}.${m}.${y}`; };
 const radioVal = name => (document.querySelector(`input[name="${name}"]:checked`) || {}).value;
 
-// Опасное действие требует второго нажатия, и случайный двойной тап за него не считается.
+// Опасное действие требует второго нажатия: первое вызывает arm(), а случайный двойной тап за второе не считается.
+function pressedTwice(armedAt, arm) {
+  if (!armedAt) {
+    arm();
+    return false;
+  }
+  return Date.now() - armedAt >= DOUBLE_TAP_MS;
+}
+
 function confirmTwice(button, label, confirmLabel, action, armedClass = 'btn warnb full') {
   let armedAt = 0;
   button.textContent = label;
   button.onclick = async () => {
-    if (!armedAt) {
+    const armed = pressedTwice(armedAt, () => {
       armedAt = Date.now();
       button.textContent = confirmLabel;
       button.className = armedClass;
-      return;
-    }
-    if (Date.now() - armedAt < DOUBLE_TAP_MS) return;
+    });
+    if (!armed) return;
     button.disabled = true;
     await action();
   };
 }
+
+// Строка карточки (dl.kv) и строка итогов (.sum).
+const kvRow = (dt, dd) => `<div><dt>${dt}</dt><dd>${dd}</dd></div>`;
+const sumRow = (label, value, cls = '') => `<div${cls ? ` class="${cls}"` : ''}><span>${label}</span><span class="v">${value}</span></div>`;
 
 function plural(n, one, few, many) {
   const a = n % 100, b = n % 10;
@@ -129,8 +140,24 @@ function armSystemBack() {
   backArmed = true;
 }
 
+/* Вкладки не перестраиваются, если с прошлого раза ничего не записано: свайп на соседнюю не ждёт чтения базы.
+   Dexie сообщает о каждой записи после её сохранения, в том числе об очистке таблиц и восстановлении. */
+
+let dataVersion = 0;
+Dexie.on('storagemutated', () => { dataVersion += 1; });
+const tabStamps = {};
+
+// Метка: версия данных, час (дата в шапке, «по сегодня», дни с прошлого бэкапа) и то, что выбрано на вкладке.
+async function renderTab(tab, extra, render) {
+  const stamp = `${dataVersion}|${nowLocal().slice(0, 13)}|${extra}`;
+  if (tabStamps[tab] === stamp) return;
+  tabStamps[tab] = null;   // если отрисовка прервётся ошибкой, в следующий раз вкладка нарисуется заново
+  await render();
+  tabStamps[tab] = stamp;
+}
+
 async function showHome() {
-  await renderHome();
+  await renderTab('home', homeNoItems, renderHome);
   show('home');
 }
 
@@ -384,6 +411,7 @@ async function watchUpdates() {
   // Самая первая установка тоже меняет controller, но обновлять там нечего.
   const hadController = !!navigator.serviceWorker.controller;
   navigator.serviceWorker.addEventListener('controllerchange', () => {
+    tabStamps.more = null;   // там показан номер версии
     if (hadController) $('update').hidden = false;
   });
   swRegistration = await navigator.serviceWorker.register('./sw.js');
@@ -494,11 +522,10 @@ function renderPlate(sum, debt) {
 async function renderHome() {
   const period = await getCurrentPeriod();
   const closed = !!period && period.status === 'closed';
-  const sum = await periodSummary(period);
-  const debts = await getDebts();
+  const [sum, debts, org, reminder] = await Promise.all([periodSummary(period), getDebts(), getSetting('org'), backupReminder()]);
   homePeriodId = period ? period.id : null;
 
-  $('h-org').textContent = await getSetting('org');
+  $('h-org').textContent = org;
   $('h-date').textContent = dFull(nowLocal());
   $('h-period').textContent = period ? period.number + (closed ? ' · закрыт' : '') : 'Период не открыт';
   $('b-newp').hidden = !closed;
@@ -511,7 +538,6 @@ async function renderHome() {
   if (closed) notes.push(`<div class="note warn"><span>Период закрыт ${dFull(period.closed)}. Возврат в кассу: <b class="num">${money(sum.returned)} сом</b>.${sum.balance > 0 ? ` На руках осталось <b class="num">${money(sum.balance)} сом</b>, в новый период этот остаток не перейдёт.` : ''}</span></div>`);
   if (sum.balance < 0) notes.push(`<div class="note bad"><span>Перерасход <b class="num">${money(-sum.balance)} сом</b>. Будет отражён в отчёте отдельной строкой.</span></div>`);
   if (sum.noDoc > 0) notes.push(`<div class="note warn"><span>Без документов: <b class="num">${money(sum.noDoc)} сом</b>. Бухгалтерия может не принять эти расходы.</span></div>`);
-  const reminder = await backupReminder();
   if (reminder) notes.push(`<div class="note info"><span>${reminder.never ? `Бэкапа ещё не было, закупок: ${reminder.count}` : `Последний бэкап ${reminder.days} дн. назад, закупок с тех пор: ${reminder.count}`}. Данные хранятся только на этом телефоне.</span></div><button class="btn full" type="button" id="h-backup">Сохранить копию</button>`);
   $('h-notes').innerHTML = notes.join('');
   if (reminder) $('h-backup').onclick = e => runBackup(e.currentTarget, renderHome);
@@ -520,9 +546,13 @@ async function renderHome() {
   const needsItems = p => !closed && p.status === 'active' && !p.items.length;
   const noItemsCount = sum.purchases.filter(needsItems).length;
   if (!noItemsCount) homeNoItems = false;
+  const [purchaseRows, repaymentRows] = await Promise.all([
+    purchaseOps(sum.purchases.filter(p => !homeNoItems || needsItems(p)), p => ({ noItems: needsItems(p) })),
+    homeNoItems ? [] : repaymentOps(sum.repayments),
+  ]);
   const operations = sortOps([
-    ...await purchaseOps(sum.purchases.filter(p => !homeNoItems || needsItems(p)), p => ({ noItems: needsItems(p) })),
-    ...(homeNoItems ? [] : [...advanceOps(sum.advances), ...returnOps(sum.returns), ...await repaymentOps(sum.repayments)]),
+    ...purchaseRows,
+    ...(homeNoItems ? [] : [...advanceOps(sum.advances), ...returnOps(sum.returns), ...repaymentRows]),
   ]);
 
   $('h-count').textContent = `${sum.count} ${plural(sum.count, 'закупка', 'закупки', 'закупок')}`;
@@ -694,15 +724,16 @@ function fillForm({ editing, no, balance, bazaars, suppliers, history, place, ty
 // prefill — кнопки «Ещё у этого поставщика» и «Повторить закупку»: остаётся ввести только сумму.
 async function openNew(prefill = null) {
   form.repaid = 0;
-  const [no, sum, last, place, bazaars, suppliers, history] = await Promise.all([
+  const [no, sum, bazaars, suppliers, history] = await Promise.all([
     peekPurchaseNo(),
     getOpenPeriod().then(periodSummary),
-    getLastPurchase(),
-    getLastPlace(),
     db.bazaars.toArray(),
     db.suppliers.toArray(),
     getRecentPurchases(),
   ]);
+  const last = history[0];
+  // Базар берётся отдельно от последней закупки: у услуги его нет, и он не должен сбрасываться.
+  const placed = history.find(p => p.place);
   fillForm({
     editing: null,
     no,
@@ -710,7 +741,7 @@ async function openNew(prefill = null) {
     bazaars,
     suppliers,
     history,
-    place,
+    place: placed ? placed.place : '',
     type: prefill ? prefill.type : 'goods',
     docType: last ? last.docType : 'ekkm',
     // В долг берут по договорённости, а не по привычке: это выбирают каждый раз сами.
@@ -1048,11 +1079,7 @@ async function submitPurchase() {
     $('f-date').focus();
     return;
   }
-  if (docType === 'none' && !(form.editing && form.editing.docType === 'none')) {
-    if (!form.noDocArmedAt) { armNoDocConfirm(); return; }
-    // Двойной тап не должен сойти за осознанное второе нажатие.
-    if (Date.now() - form.noDocArmedAt < DOUBLE_TAP_MS) return;
-  }
+  if (docType === 'none' && !(form.editing && form.editing.docType === 'none') && !pressedTwice(form.noDocArmedAt, armNoDocConfirm)) return;
 
   const data = {
     type,
@@ -1121,14 +1148,16 @@ const AUDIT_FIELDS = {
 };
 const AUDIT_STATUS = { active: 'Активна', storno: 'Сторно', open: 'Открыт', closed: 'Закрыт' };
 
-async function auditContext() {
-  const [suppliers, purposes, bazaars, purchases, periods] = await Promise.all([db.suppliers.toArray(), db.purposes.toArray(), db.bazaars.toArray(), db.purchases.toArray(), db.periods.toArray()]);
+// Имена для записей журнала. Закупки читаются только те, о которых есть записи: всех может быть много.
+async function auditContext(entries) {
+  const purchaseIds = [...new Set(entries.filter(e => e.entity === 'purchase').map(e => e.entityId))];
+  const [suppliers, purposes, bazaars, purchases, periods] = await Promise.all([db.suppliers.toArray(), db.purposes.toArray(), db.bazaars.toArray(), db.purchases.bulkGet(purchaseIds), db.periods.toArray()]);
   const names = list => new Map(list.map(x => [x.id, x.name]));
   return {
     suppliers: names(suppliers),
     purposes: names(purposes),
     bazaars: names(bazaars),
-    purchases: new Map(purchases.map(p => [p.id, p])),
+    purchases: new Map(purchases.filter(Boolean).map(p => [p.id, p])),
     periods: new Map(periods.map(p => [p.id, p.number])),
   };
 }
@@ -1171,7 +1200,8 @@ function renderAudit(e, ctx, withSubject) {
 }
 
 async function openLog() {
-  const [entries, ctx] = await Promise.all([db.auditLog.orderBy(':id').reverse().limit(300).toArray(), auditContext()]);
+  const entries = await db.auditLog.orderBy(':id').reverse().limit(300).toArray();
+  const ctx = await auditContext(entries);
   $('l-list').innerHTML = entries.length
     ? entries.map(e => renderAudit(e, ctx, true)).join('')
     : '<div class="empty">Изменений пока не было.</div>';
@@ -1210,14 +1240,14 @@ function renderItemsTable(x) {
 async function openCard(id, next = null) {
   cardId = id;
   const x = await db.purchases.get(id);
-  const [supplier, period, photos, history, ctx, repayments] = await Promise.all([
+  const [supplier, period, photos, history, repayments] = await Promise.all([
     db.suppliers.get(x.supplierId),
     db.periods.get(x.periodId),
     db.photos.where('purchaseId').equals(id).toArray(),
     db.auditLog.where('entityId').equals(id).filter(e => e.entity === 'purchase').toArray(),
-    auditContext(),
     db.repayments.where('purchaseId').equals(id).toArray(),
   ]);
+  const ctx = history.length ? await auditContext(history) : null;
   releaseViewPhotos();
   const shots = photos.map(p => ({ id: p.id, kind: p.kind, url: viewPhotoUrl(p.blob) }));
   const receipts = shots.filter(p => p.kind === 'receipt');
@@ -1229,7 +1259,6 @@ async function openCard(id, next = null) {
   // Деньги за закупку уже у поставщика: сторно и удаление только после удаления погашений.
   const locked = repayments.length > 0;
 
-  const row = (dt, dd) => `<div><dt>${dt}</dt><dd>${dd}</dd></div>`;
   const badge = storno ? '<span class="tag bad">сторно</span>' : x.docType === 'none' ? '<span class="tag warn">нет документа</span>' : debtOf(x) ? '<span class="tag warn">в долг</span>' : '';
   $('c-title').innerHTML = `Закупка <span class="num">№${pad3(x.no)}</span>`;
   $('c-body').innerHTML =
@@ -1237,15 +1266,15 @@ async function openCard(id, next = null) {
     `<div class="row"><span class="amount-hero${storno ? ' muted struck' : ''}">${money(x.amount)} сом</span><span class="spacer"></span>${badge}</div>` +
     (storno ? `<div class="note bad"><span><b>Сторнирована.</b> ${esc(x.stornoReason)}</span></div>` : '') +
     '<dl class="kv">' +
-    row('Дата', `<span class="tnum">${dFull(x.dt)}, ${x.dt.slice(11, 16)}</span>`) +
-    (purchaseTitle(x) ? row(service ? 'Услуга' : 'Товар', esc(purchaseTitle(x))) : '') +
+    kvRow('Дата', `<span class="tnum">${dFull(x.dt)}, ${x.dt.slice(11, 16)}</span>`) +
+    (purchaseTitle(x) ? kvRow(service ? 'Услуга' : 'Товар', esc(purchaseTitle(x))) : '') +
     linkRow(service ? 'Исполнитель' : 'Поставщик', esc(supplier.name), `supplier:${supplier.id}`) +
-    (supplier.phone ? row('Телефон', telLink(supplier.phone)) : '') +
-    (x.place ? row('Базар', esc(x.place)) : '') +
-    row('Документ', DOC[x.docType]) +
-    row('Оплата', PAY[x.payment]) +
+    (supplier.phone ? kvRow('Телефон', telLink(supplier.phone)) : '') +
+    (x.place ? kvRow('Базар', esc(x.place)) : '') +
+    kvRow('Документ', DOC[x.docType]) +
+    kvRow('Оплата', PAY[x.payment]) +
     linkRow('Период', esc(period.number), `period:${period.id}`) +
-    (x.comment ? row('Комментарий', esc(x.comment)) : '') +
+    (x.comment ? kvRow('Комментарий', esc(x.comment)) : '') +
     '</dl>' +
     (editable ? '<div class="btn-row"><button class="btn primary" type="button" id="c-items">Позиции</button><button class="btn" type="button" id="c-edit">Изменить</button></div><button class="btn full" type="button" id="c-repeat">Повторить закупку</button>' : '') +
     (debtOf(x) ? await renderDebtBlock(x, repayments) : '') +
@@ -1310,7 +1339,7 @@ const telLink = phone => `<a href="tel:${esc(phone.replace(/[^\d+]/g, ''))}">${e
 async function renderDebtBlock(x, repayments) {
   const repaid = sumAmounts(repayments);
   const left = debtOf(x) - repaid;
-  const line = (label, value, cls = '') => `<div class="${cls}"><span>${label}</span><span class="v">${money(value)}</span></div>`;
+  const line = (label, value, cls) => sumRow(label, money(value), cls);
   return '<div class="section-h"><h3>Долг поставщику</h3></div>' +
     '<div class="sum">' +
     line('Взято в долг', debtOf(x)) +
@@ -1324,7 +1353,7 @@ async function renderDebtBlock(x, repayments) {
 
 function shotHtml(shot, alt, editable) {
   const remove = editable ? `<button class="linkbtn bad" type="button" data-del-shot="${shot.id}"></button>` : '';
-  return `<img class="photo-full" src="${shot.url}" alt="${alt}">${remove}`;
+  return `<img class="photo-full" src="${shot.url}" alt="${alt}" loading="lazy" decoding="async">${remove}`;
 }
 
 // Сжатие занимает время: человек мог уже уйти с этой карточки.
@@ -1370,24 +1399,23 @@ async function openEntry(kind, id) {
   const spec = ENTRY[kind];
   const x = await spec.table().get(id);
   const period = await db.periods.get(x.periodId);
-  const row = (dt, dd) => `<div><dt>${dt}</dt><dd>${dd}</dd></div>`;
   let rows = '';
-  if (kind === 'advance') rows = row('Дата', dFull(x.date)) + row('Способ', ADV_METHOD[x.method]) + row('Кто выдал', esc(x.by));
-  if (kind === 'return') rows = row('Дата', dFull(x.dt)) + row('Способ', MONEY_METHOD[x.method]) + row('Кому', esc(x.to));
+  if (kind === 'advance') rows = kvRow('Дата', dFull(x.date)) + kvRow('Способ', ADV_METHOD[x.method]) + kvRow('Кто выдал', esc(x.by));
+  if (kind === 'return') rows = kvRow('Дата', dFull(x.dt)) + kvRow('Способ', MONEY_METHOD[x.method]) + kvRow('Кому', esc(x.to));
   if (kind === 'repayment') {
     const purchase = await db.purchases.get(x.purchaseId);
     const supplier = purchase && await db.suppliers.get(purchase.supplierId);
-    rows = row('Дата', dFull(x.dt)) + row('Способ', MONEY_METHOD[x.method]) +
+    rows = kvRow('Дата', dFull(x.dt)) + kvRow('Способ', MONEY_METHOD[x.method]) +
       (purchase
         ? linkRow('Поставщик', esc(supplier.name), `supplier:${supplier.id}`) + linkRow('За закупку', `№${pad3(purchase.no)} от ${dFull(purchase.dt)}`, `card:${purchase.id}`)
-        : row('За закупку', 'убрана в архив'));
+        : kvRow('За закупку', 'убрана в архив'));
   }
   $('e-title').textContent = spec.title;
   $('e-body').innerHTML =
     `<div class="row"><span class="amount-hero">${money(x.amount)} сом</span></div>` +
     '<dl class="kv">' + rows +
     linkRow('Период', esc(period.number), `period:${period.id}`) +
-    (x.comment ? row('Комментарий', esc(x.comment)) : '') +
+    (x.comment ? kvRow('Комментарий', esc(x.comment)) : '') +
     '</dl>' +
     (period.status === 'open' ? '<button class="btn danger full" type="button" id="e-delete"></button>' : '');
   if (period.status === 'open') {
@@ -1571,15 +1599,12 @@ async function submitItems() {
     toast(`По позициям выходит ${money(total)} сом, а поставщику уже отдано ${money(purchase.paidNow + itemsForm.repaid)} сом. Проверьте позиции или удалите лишние погашения.`, 7000);
     return;
   }
-  if (items.length && total !== itemsForm.purchase.amount) {
-    if (!itemsForm.armedAt) {
-      itemsForm.armedAt = Date.now();
-      $('i-save').textContent = `Заменить сумму на ${money(total)} сом`;
-      $('i-save').className = 'btn warnb full';
-      return;
-    }
-    if (Date.now() - itemsForm.armedAt < DOUBLE_TAP_MS) return;
-  }
+  const armReplace = () => {
+    itemsForm.armedAt = Date.now();
+    $('i-save').textContent = `Заменить сумму на ${money(total)} сом`;
+    $('i-save').className = 'btn warnb full';
+  };
+  if (items.length && total !== itemsForm.purchase.amount && !pressedTwice(itemsForm.armedAt, armReplace)) return;
 
   const { id } = itemsForm.purchase;
   itemsForm.saving = true;
@@ -1671,7 +1696,7 @@ async function openList(build) {
 const countLabel = (n, one, few, many) => `${n} ${plural(n, one, few, many)}`;
 
 function listBody({ sub, total, lines = [], ops, empty, after = '' }) {
-  const line = ([label, value, cls = '']) => `<div class="${cls}"><span>${label}</span><span class="v">${value}</span></div>`;
+  const line = ([label, value, cls]) => sumRow(label, value, cls);
   const totalRow = total === undefined ? [] : [['Итого', `${money(total)} сом`, 'total']];
   return (sub ? `<p class="muted hint">${sub}</p>` : '') +
     (lines.length || totalRow.length ? `<div class="sum">${[...lines, ...totalRow].map(line).join('')}</div>` : '') +
@@ -1822,16 +1847,15 @@ async function openSupplier(id) {
   const own = debts.filter(d => d.supplierId === id);
   const left = sumLeft(own);
   const active = purchases.filter(p => p.status === 'active');
-  const row = (dt, dd) => `<div><dt>${dt}</dt><dd>${dd}</dd></div>`;
   releaseViewPhotos();
   $('sp-title').textContent = supplier.name;
   $('sp-body').innerHTML =
     '<dl class="kv">' +
-    (supplier.phone ? row('Телефон', telLink(supplier.phone)) : '') +
-    (supplier.place ? row('Базар', esc(supplier.place)) : '') +
-    row('Закупки', `${active.length} на ${money(sumAmounts(active))} сом`) +
-    (supplier.comment ? row('Комментарий', esc(supplier.comment)) : '') +
-    (supplier.archived ? row('В архиве', 'да') : '') +
+    (supplier.phone ? kvRow('Телефон', telLink(supplier.phone)) : '') +
+    (supplier.place ? kvRow('Базар', esc(supplier.place)) : '') +
+    kvRow('Закупки', `${active.length} на ${money(sumAmounts(active))} сом`) +
+    (supplier.comment ? kvRow('Комментарий', esc(supplier.comment)) : '') +
+    (supplier.archived ? kvRow('В архиве', 'да') : '') +
     '</dl>' +
     (left
       ? `<div class="section-h"><h3>Должен</h3><span class="num">${money(left)} сом</span></div>` +
@@ -1842,7 +1866,7 @@ async function openSupplier(id) {
     `<div class="list">${purchases.length ? sortOps(await purchaseOps(purchases)).map(renderOperation).join('') : '<div class="empty">Закупок пока нет.</div>'}</div>` +
     (shots.length
       ? '<div class="section-h"><h3>Фото поставщика</h3></div>' + shots.map(({ blob, purchase }) =>
-        `<img class="photo-full" src="${viewPhotoUrl(blob)}" alt="Фото поставщика, закупка №${pad3(purchase.no)}"><p class="muted hint">Закупка №${pad3(purchase.no)}, ${dFull(purchase.dt)}</p>`).join('')
+        `<img class="photo-full" src="${viewPhotoUrl(blob)}" alt="Фото поставщика, закупка №${pad3(purchase.no)}" loading="lazy" decoding="async"><p class="muted hint">Закупка №${pad3(purchase.no)}, ${dFull(purchase.dt)}</p>`).join('')
       : '') +
     '<button class="btn full" type="button" id="sp-edit">Изменить данные поставщика</button>';
   if (left) $('sp-repay').onclick = () => drill(() => openRepay(own.map(d => d.id)));
@@ -2276,17 +2300,18 @@ $('r-sum').addEventListener('click', e => {
   if (b) drill(() => openList(SUM_LISTS[b.dataset.sum](report.period.id)));
 });
 
-async function showReport(periodId) {
+let reportPeriod = null;   // период, который сейчас нарисован в Отчёте
+
+async function renderReport(periodId) {
   const [periods, current] = await Promise.all([db.periods.toArray(), getCurrentPeriod()]);
   const period = periods.find(p => p.id === periodId) || current;
+  reportPeriod = period || null;
   $('r-period-field').hidden = periods.length < 2;
   $('r-body').hidden = !period;
-  $('r-reopen').innerHTML = '';
   if (!period) {
     $('r-status').textContent = '';
     $('r-sub').textContent = 'Отчёт появится после первой выдачи аванса.';
     $('r-notes').innerHTML = '';
-    show('report');
     return;
   }
 
@@ -2309,20 +2334,26 @@ async function showReport(periodId) {
     };
   }
 
-  chips($('r-view'), 'rview', [['stats', 'Статистика'], ['sum', 'Итоги']], reportView);
   chips($('r-range'), 'range', Object.entries(STAT_MODES), statsRange.mode);
   await drawStats();
-  applyReportView();
   $('r-sum').innerHTML = renderReportSum(r);
   $('r-table').innerHTML =
     '<thead><tr><th>№</th><th>Дата</th><th>Товар / услуга</th><th>Поставщик</th><th>Документ</th><th>Оплата</th><th class="r">Сумма</th></tr></thead><tbody>' +
     r.purchases.map(p => `<tr data-open="card:${p.id}"${p.status === 'storno' ? ' class="struck"' : ''}><td class="num">${pad3(p.no)}</td><td class="tnum">${dShort(p.dt)}</td><td>${esc(reportTitle(p))}</td><td>${esc(p.supplier)}</td><td>${DOC[p.docType]}</td><td>${PAY[p.payment]}</td><td class="r">${money(p.amount)}</td></tr>`).join('') +
     `</tbody><tfoot><tr><td colspan="6">Итого без сторно</td><td class="r">${money(r.bought)}</td></tr></tfoot>`;
+}
 
+// Вид отчёта и форма переоткрытия сбрасываются при каждом показе, даже если сам отчёт не перестраивался.
+async function showReport(periodId) {
+  await renderTab('report', periodId || '', () => renderReport(periodId));
+  const period = reportPeriod;
+  const closed = !!period && period.status === 'closed';
+  chips($('r-view'), 'rview', [['stats', 'Статистика'], ['sum', 'Итоги']], reportView);
+  applyReportView();
   $('r-close').hidden = closed;
-  if (closed) $('r-reopen').innerHTML = '<button class="btn danger full" type="button" id="r-reopen-open">Переоткрыть период</button>';
+  $('r-reopen').innerHTML = closed ? '<button class="btn danger full" type="button" id="r-reopen-open">Переоткрыть период</button>' : '';
   if (closed) $('r-reopen-open').onclick = openReopen;
-  show('report', () => showReport(period.id));
+  show('report', period ? () => showReport(period.id) : undefined);
 }
 
 $('r-period').onchange = e => showReport(Number(e.target.value));
@@ -2443,7 +2474,12 @@ $('cl-do').onclick = async () => {
 const dict = { kind: null, record: null, saving: false };
 
 async function showMore() {
-  const [userName, org, lastBackupAt, suppliers, bazaars, purchases, debts] = await Promise.all([
+  await renderTab('more', '', renderMore);
+  show('more');
+}
+
+async function renderMore() {
+  const [userName, org, lastBackupAt, suppliers, bazaars, purchases, debts, photoSize, closedCount, version] = await Promise.all([
     getSetting('userName'),
     getSetting('org'),
     getSetting('lastBackupAt'),
@@ -2451,15 +2487,24 @@ async function showMore() {
     db.bazaars.toArray(),
     db.purchases.where('status').equals('active').toArray(),
     getDebts(),
+    db.photos.toArray().then(list => list.reduce((sum, p) => sum + p.blob.size, 0)),
+    db.periods.where('status').equals('closed').count(),
+    installedVersion(),
   ]);
   const byName = (a, b) => a.name.localeCompare(b.name, 'ru');
+  const bought = new Map();
+  purchases.forEach(p => {
+    const total = bought.get(p.supplierId) || { count: 0, sum: 0 };
+    total.count += 1;
+    total.sum += p.amount;
+    bought.set(p.supplierId, total);
+  });
+  const owed = new Map();
+  debts.forEach(d => owed.set(d.supplierId, (owed.get(d.supplierId) || 0) + d.left));
   $('s-name').value = userName || '';
   $('s-org').value = org || '';
   $('s-sup-n').textContent = suppliers.length;
-  const photoSize = await db.photos.toArray().then(list => list.reduce((sum, p) => sum + p.blob.size, 0));
-  const closedCount = await db.periods.where('status').equals('closed').count();
   $('s-usage').textContent = `Фото занимают ${formatSize(photoSize)}. Закрытых периодов: ${closedCount}.`;
-  const version = await installedVersion();
   $('s-version').textContent = `Версия ${version || 'не установлена'}. Обновления скачиваются сами, когда есть интернет.`;
   $('s-backup-note').textContent = `Данные хранятся только на этом телефоне. Последняя копия: ${lastBackupAt ? dFull(lastBackupAt) : 'ещё не делалась'}.`;
   $('s-baz').innerHTML = bazaars.sort(byName).map(b =>
@@ -2467,12 +2512,11 @@ async function showMore() {
   ).join('');
   $('s-sup').innerHTML = suppliers.length
     ? suppliers.sort(byName).map(s => {
-      const own = purchases.filter(p => p.supplierId === s.id);
-      const debt = sumLeft(debts.filter(d => d.supplierId === s.id));
-      return `<button class="item plain" type="button" data-open="supplier:${s.id}"><span class="t">${esc(s.name)}${s.archived ? '<span class="tag warn">архив</span>' : ''}${debt ? `<span class="tag warn">долг ${money(debt)}</span>` : ''}</span><span class="s tnum">${own.length} закуп. · ${money(sumAmounts(own))}</span></button>`;
+      const own = bought.get(s.id) || { count: 0, sum: 0 };
+      const debt = owed.get(s.id) || 0;
+      return `<button class="item plain" type="button" data-open="supplier:${s.id}"><span class="t">${esc(s.name)}${s.archived ? '<span class="tag warn">архив</span>' : ''}${debt ? `<span class="tag warn">долг ${money(debt)}</span>` : ''}</span><span class="s tnum">${own.count} закуп. · ${money(own.sum)}</span></button>`;
     }).join('')
     : '<div class="empty">Появятся после первой закупки.</div>';
-  show('more');
 }
 
 $('s-backup').onclick = e => runBackup(e.currentTarget, showMore);
@@ -2499,7 +2543,7 @@ $('s-restore').addEventListener('change', async e => {
     return;
   }
   const [periods, purchases, photos] = await Promise.all([db.periods.count(), db.purchases.count(), db.photos.count()]);
-  const row = (label, inFile, now) => `<div><span>${label}</span><span class="v">в копии ${inFile}, сейчас ${now}</span></div>`;
+  const row = (label, inFile, now) => sumRow(label, `в копии ${inFile}, сейчас ${now}`);
   const { tables } = backup;
   restore.backup = backup;
   $('rs-sum').innerHTML =
@@ -2517,13 +2561,12 @@ $('rs-backup').onclick = e => runBackup(e.currentTarget, async () => { $('rs-bac
 
 $('rs-do').onclick = async () => {
   if (restore.saving) return;
-  if (!restore.armedAt) {
+  const arm = () => {
     restore.armedAt = Date.now();
     $('rs-do').textContent = 'Нажмите ещё раз: данные будут заменены';
     $('rs-do').className = 'btn warnb full';
-    return;
-  }
-  if (Date.now() - restore.armedAt < DOUBLE_TAP_MS) return;
+  };
+  if (!pressedTwice(restore.armedAt, arm)) return;
   restore.saving = true;
   $('rs-do').disabled = true;
   try {
@@ -2550,9 +2593,8 @@ const archive = { built: null, unpack: null };
 
 async function openArchive() {
   const { periods, kept, purchases, photos, size } = await closedPeriodsData();
-  const row = (label, value) => `<div><span>${label}</span><span class="v">${value}</span></div>`;
   archive.built = null;
-  $('ar-sum').innerHTML = row('Закрытые периоды', periods.length) + row('Закупки', purchases.length) + row('Фото', `${photos.length}, ${formatSize(size)}`);
+  $('ar-sum').innerHTML = sumRow('Закрытые периоды', periods.length) + sumRow('Закупки', purchases.length) + sumRow('Фото', `${photos.length}, ${formatSize(size)}`);
   const notes = [];
   if (!periods.length && !kept.length) notes.push('<div class="note warn"><span>Закрытых периодов пока нет. Архивируются только закрытые.</span></div>');
   if (kept.length) notes.push(`<div class="note warn"><span>Остаются в приложении: ${esc(kept.map(p => p.number).join(', '))}. В них есть непогашенный долг или погашение, связанное с открытым периодом.</span></div>`);
@@ -2613,10 +2655,9 @@ $('s-unarchive').addEventListener('change', async e => {
     return;
   }
   const { tables, exportedAt } = archive.unpack;
-  const row = (label, value) => `<div><span>${label}</span><span class="v">${value}</span></div>`;
-  $('ua-sum').innerHTML = row('Архив от', esc(dFull(exportedAt))) +
-    row('Периоды', esc(tables.periods.map(p => p.number).join(', '))) +
-    row('Закупки', tables.purchases.length) + row('Фото', tables.photos.length);
+  $('ua-sum').innerHTML = sumRow('Архив от', esc(dFull(exportedAt))) +
+    sumRow('Периоды', esc(tables.periods.map(p => p.number).join(', '))) +
+    sumRow('Закупки', tables.purchases.length) + sumRow('Фото', tables.photos.length);
   const overlaps = await countNumberOverlaps(tables.purchases);
   $('ua-note').innerHTML = overlaps
     ? `<div class="note warn"><span>Совпадают номера: ${overlaps} ${plural(overlaps, 'закупка', 'закупки', 'закупок')}. Архивные сохранят свои номера с чеков, отличить их можно по дате и периоду. Новые номера пойдут дальше.</span></div>`
@@ -2649,8 +2690,7 @@ let wiping = false;
 
 async function openWipe() {
   const [periods, purchases, photos] = await Promise.all([db.periods.count(), db.purchases.count(), db.photos.count()]);
-  const row = (label, value) => `<div><span>${label}</span><span class="v">${value}</span></div>`;
-  $('w-sum').innerHTML = row('Периоды', periods) + row('Закупки', purchases) + row('Фото', photos);
+  $('w-sum').innerHTML = sumRow('Периоды', periods) + sumRow('Закупки', purchases) + sumRow('Фото', photos);
   $('w-backup').textContent = 'Сначала сохранить копию';
   $('w-word').value = '';
   $('w-do').disabled = true;
